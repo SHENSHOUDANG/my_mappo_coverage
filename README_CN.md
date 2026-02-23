@@ -82,24 +82,3 @@ class EnvCore(object):
 
 [MIT](LICENSE) © tinyzqh
 
-
-
-## 训练期间val与训练后test评估
-
-- 训练期间固定使用 `scenario_suite_val` 作为评估集。
-- 会自动保存三类最佳模型：`best_reward`、`best_success`、`best_steps`。
-- 训练结束后会自动在 `scenario_suite_test` 上评估上述模型，并为每个场景保存测试 GIF。
-- 当 `target_policy_source=train` 时，val/test 默认会对同一场景分别在 `patrol` 和 `train` 两种模式下评估；否则仅评估 `patrol`。
-
-配置示例（保持原训练命令不变）：
-
-```yaml
-eval:
-  use_eval: true
-  scenario_suite_val: datasets/val
-  scenario_suite_test: datasets/test
-  eval_dataset_split: val
-
-uav_pursuit:
-  train_patrol_route_dir: datasets/val/patrol_routes
-```

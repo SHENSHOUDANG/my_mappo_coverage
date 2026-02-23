@@ -59,8 +59,6 @@ Simply download the code, create a Conda environment, and then run the code, add
 
 ## Usage
 
-
-
 - The environment part is an empty implementation, and the implementation of the environment part in the light_mappo/envs/env_core.py file is: [Code] (https://github.com/tinyzqh/light_mappo/blob/main/envs/env_core.py)
 
 ```python
@@ -103,30 +101,9 @@ class EnvCore(object):
 ```
 
 
-
 Just write this part of the code, and you can seamlessly connect with MAPPO. After env_core.py, two files, env_discrete.py and env_continuous.py, were separately extracted to encapsulate the action space and discrete action space. In elif self.continuous_action: in algorithms/utils/act.py, this judgment logic is also used to handle continuous action spaces. The # TODO here in runner/shared/env_runner.py is also used to handle continuous action spaces.
 
 In the train.py file, choose to comment out continuous environment or discrete environment to switch the demo environment.
-
-### Multi-UAV pursuit (MPE)
-
-This repo includes a Multi-UAV pursuit scenario implemented with MPE and a dedicated training script that logs GIFs every N episodes. The default configuration trains with 3 Hunters, 0 Blockers, and 1 Target, saving a trajectory GIF every 10 episodes.
-
-```bash
-python train/train_uav_pursuit.py \
-  --algorithm_name mappo \
-  --experiment_name uav_pursuit_demo \
-  --num_hunters 3 \
-  --num_blockers 0 \
-  --episode_length 200 \
-  --num_env_steps 200000
-```
-
-Training GIFs are saved under:
-
-```
-results/MPE/uav_pursuit/mappo/<experiment_name>/run*/gifs
-```
 
 ## Cite this work
 

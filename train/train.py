@@ -20,10 +20,10 @@ parent_dir = os.path.abspath(os.path.join(os.getcwd(), "."))
 # Append the parent directory to sys.path, otherwise the following import will fail
 sys.path.append(parent_dir)
 
-from parameters import get_config, parse_args_with_yaml
+from config import get_config
 from envs.env_wrappers import DummyVecEnv
 
-"""Train script for Gyms."""
+"""Train script for MPEs."""
 
 
 def make_train_env(all_args):
@@ -71,14 +71,14 @@ def parse_args(args, parser):
     parser.add_argument("--num_landmarks", type=int, default=3)
     parser.add_argument("--num_agents", type=int, default=2, help="number of players")
 
-    all_args, config_path = parse_args_with_yaml(args, parser)
+    all_args = parser.parse_known_args(args)[0]
 
-    return all_args, config_path
+    return all_args
 
 
 def main(args):
     parser = get_config()
-    all_args, config_path = parse_args(args, parser)
+    all_args = parse_args(args, parser)
 
     if all_args.algorithm_name == "rmappo":
         assert all_args.use_recurrent_policy or all_args.use_naive_recurrent_policy, "check recurrent policy!"
@@ -95,25 +95,16 @@ def main(args):
 
     # cuda
     if all_args.cuda and torch.cuda.is_available():
-        try:
-            torch.cuda.set_device(0)
-            torch.cuda.init()
-            # Force a small matmul to verify cublasLt init works.
-            _ = (torch.randn(1, 1, device="cuda") @ torch.randn(1, 1, device="cuda"))
-            print("choose to use gpu...")
-            device = torch.device("cuda:0")
-            if all_args.cuda_deterministic:
-                torch.backends.cudnn.benchmark = False
-                torch.backends.cudnn.deterministic = True
-        except Exception as exc:
-            print(f"cuda init failed, fallback to cpu: {exc}")
-            device = torch.device("cpu")
-            all_args.cuda = False
+        print("choose to use gpu...")
+        device = torch.device("cuda:0")
+        torch.set_num_threads(all_args.n_training_threads)
+        if all_args.cuda_deterministic:
+            torch.backends.cudnn.benchmark = False
+            torch.backends.cudnn.deterministic = True
     else:
         print("choose to use cpu...")
         device = torch.device("cpu")
-
-    torch.set_num_threads(all_args.n_training_threads)
+        torch.set_num_threads(all_args.n_training_threads)
 
     # run dir
     run_dir = (
@@ -141,10 +132,6 @@ def main(args):
     run_dir = run_dir / curr_run
     if not run_dir.exists():
         os.makedirs(str(run_dir))
-    if config_path:
-        config_file = Path(config_path)
-        config_target = run_dir / config_file.name
-        config_target.write_text(config_file.read_text(encoding="utf-8"), encoding="utf-8")
 
     setproctitle.setproctitle(
         str(all_args.algorithm_name)
@@ -158,8 +145,7 @@ def main(args):
 
     # seed
     torch.manual_seed(all_args.seed)
-    if device.type == "cuda":
-        torch.cuda.manual_seed_all(all_args.seed)
+    torch.cuda.manual_seed_all(all_args.seed)
     np.random.seed(all_args.seed)
 
     # env init

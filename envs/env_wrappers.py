@@ -49,22 +49,6 @@ class DummyVecEnv():
         obs = [env.reset() for env in self.envs] # [env_num, agent_num, obs_dim]
         return np.array(obs)
 
-    def set_target_patrol_route(self, route_name):
-        for env in self.envs:
-            if hasattr(env, "set_target_patrol_route"):
-                env.set_target_patrol_route(route_name)
-
-    def set_target_patrol_waypoints(self, waypoints, route_name=None):
-        for env in self.envs:
-            if hasattr(env, "set_target_patrol_waypoints"):
-                env.set_target_patrol_waypoints(waypoints, route_name=route_name)
-
-    def apply_scenario_config(self, scenario):
-        # 向量化环境广播场景配置，确保每个并行环境使用同一场景参数。
-        for env in self.envs:
-            if hasattr(env, "apply_scenario_config"):
-                env.apply_scenario_config(scenario)
-
     def close(self):
         for env in self.envs:
             env.close()

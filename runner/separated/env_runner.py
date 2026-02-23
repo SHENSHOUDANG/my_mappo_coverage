@@ -83,7 +83,7 @@ class EnvRunner(Runner):
                     )
                 )
 
-                if self.env_name == "Gym":
+                if self.env_name == "MPE":
                     for agent_id in range(self.num_agents):
                         idv_rews = []
                         for info in infos:
