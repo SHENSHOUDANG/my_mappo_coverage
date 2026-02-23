@@ -1,20 +1,20 @@
 # Experiment settings
 exp:
   algorithm_name: mappo
-  experiment_name: Hunter3_Target1_SpeedP0.05
+  experiment_name: Hunter3_Target1_SpeedP0.05_collision
   seed: 1
   cuda: true
   cuda_deterministic: true
   n_training_threads: 2
   n_rollout_threads: 5
-  n_eval_rollout_threads: 2
+  n_eval_rollout_threads: 1
   n_render_rollout_threads: 1
-  num_env_steps: 10000000 # total environment steps to train
+  num_env_steps: 1000000 # total environment steps to train
   user_name: marl
 
 # Environment settings (common)
 env:
-  env_name: Gym
+  env_name: SeenNoise
   use_obs_instead_of_state: false # use global state instead of concatenated local obs
   episode_length: 200 # max steps per episode
 
@@ -27,10 +27,17 @@ uav_pursuit:
   dt: 0.1
   capture_radius: 0.05
   capture_steps: 10
+  collision_radius: 0.02
+  collision_penalty_k: 5.0
+  noisy_target_info_when_unseen: true
+  noisy_target_pos_std: 0.03
+  noisy_target_vel_std: 0.03
+  lost_target_penalty: 0.1
+  lost_target_penalty_age_scale: 0.02
   gif_interval: 10
   gif_frame_duration: 0.1
   target_policy_source: train
-  target_patrol_path: config/target_patrol_route.json
+  target_patrol_path: config/target_patrol_routes.json
   target_patrol_names: null
   target_patrol_switch_interval: 0
   eval_random_patrol_routes: 0
@@ -103,8 +110,8 @@ logging:
 # Evaluation settings
 eval:
   use_eval: true
-  eval_interval: 25
-  eval_episodes: 32
+  eval_interval: 100
+  eval_episodes: 5
   scenario_suite_val: datasets/val
   scenario_suite_test: datasets/test
   eval_dataset_split: val

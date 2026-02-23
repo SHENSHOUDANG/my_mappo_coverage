@@ -5,11 +5,15 @@ dt: 0.1
 capture_radius: 0.12
 capture_steps: 5
 episode_length: 100
-seed: 101
-initial_positions:
-  - [-0.6, 0.0]
-  - [-0.5, 0.2]
-  - [-0.5, -0.2]
-  - [0.7, 0.0]
-target_patrol_route_id: "001"
-eval_target_modes: [patrol, train]
+seed: 1307
+initial_positions: null
+target_patrol_route_id: '001'
+eval_target_modes:
+- patrol
+- train
+max_speed_hunter: 0.112
+max_speed_blocker: 0.0
+max_speed_target: 0.085
+perception_hunter: 0.255
+perception_blocker: 0.0
+perception_target: 0.323

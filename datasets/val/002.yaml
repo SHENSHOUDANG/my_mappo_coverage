@@ -1,19 +1,19 @@
-# val 场景 002：同时评估 patrol/train 两种 target 行为
 num_hunters: 3
 num_blockers: 0
-world_size: 1.2
+world_size: 1.4
 dt: 0.1
-capture_radius: 0.10
+capture_radius: 0.12
 capture_steps: 5
 episode_length: 100
-seed: 202
-initial_positions:
-  - [-0.7, 0.1]
-  - [-0.5, 0.4]
-  - [-0.5, -0.3]
-  - [0.6, 0.0]
-target_policy_source: train
-target_patrol_route_id: "002"
-# 可指向 datasets/val/actor_target.pt 或训练产物中的 actor_target.pt
-target_policy_model_path: null
-eval_target_modes: [patrol, train]
+seed: 1314
+initial_positions: null
+target_patrol_route_id: '002'
+eval_target_modes:
+- patrol
+- train
+max_speed_hunter: 0.108
+max_speed_blocker: 0.0
+max_speed_target: 0.104
+perception_hunter: 0.213
+perception_blocker: 0.0
+perception_target: 0.335

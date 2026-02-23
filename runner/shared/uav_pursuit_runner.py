@@ -166,7 +166,8 @@ class UavPursuitRunner(EnvRunner):
                 self.record_train_metrics(total_num_steps, train_infos["system"]["average_episode_rewards"])
                 self._maybe_report_best_metrics(total_num_steps, train_avg_reward=train_infos["system"]["average_episode_rewards"])
 
-            if (episode + 1) % self.gif_interval == 0:
+            if episode % self.gif_interval == 0:
+                # print(f"episode {episode}, save GIF")
                 self._save_training_gif(episode + 1)
 
             if episode % self.eval_interval == 0 and self.use_eval:
@@ -242,7 +243,12 @@ class UavPursuitRunner(EnvRunner):
             for group_name, agent_ids in self.policy_groups.items()
         }
 
-        frames = [self._draw_frame(positions, env.world_size, env.perception_ranges, hunter_indices, blocker_indices, target_index, capture, episode_idx, step=0)]
+        target_true = env.positions[target_index].copy() if target_index is not None else None
+        target_obs = env.pursuit_obs_target_pos.copy() if env.pursuit_obs_target_pos is not None else None
+        target_err = None
+        if target_true is not None and target_obs is not None:
+            target_err = float(np.linalg.norm(target_true - target_obs))
+        frames = [self._draw_frame(positions, env.world_size, env.perception_ranges, hunter_indices, blocker_indices, target_index, capture, episode_idx, step=0, target_true_pos=target_true, target_obs_pos=target_obs, target_obs_err=target_err)]
 
         for step in range(1, self.episode_length + 1):
             actions_env = np.zeros((env.agent_num, env.action_dim), dtype=np.float32)
@@ -263,7 +269,12 @@ class UavPursuitRunner(EnvRunner):
             for idx in range(env.agent_num):
                 positions[idx].append(env.positions[idx].copy())
 
-            frames.append(self._draw_frame(positions, env.world_size, env.perception_ranges, hunter_indices, blocker_indices, target_index, capture, episode_idx, step=step))
+            target_true = env.positions[target_index].copy() if target_index is not None else None
+            target_obs = env.pursuit_obs_target_pos.copy() if env.pursuit_obs_target_pos is not None else None
+            target_err = None
+            if target_true is not None and target_obs is not None:
+                target_err = float(np.linalg.norm(target_true - target_obs))
+            frames.append(self._draw_frame(positions, env.world_size, env.perception_ranges, hunter_indices, blocker_indices, target_index, capture, episode_idx, step=step, target_true_pos=target_true, target_obs_pos=target_obs, target_obs_err=target_err))
 
             for group_name, agent_ids in self.policy_groups.items():
                 group_dones = dones[agent_ids]
@@ -472,7 +483,7 @@ class UavPursuitRunner(EnvRunner):
         lc = LineCollection(segments, colors=rgba, linewidths=2.0)
         ax.add_collection(lc)
 
-    def _draw_frame(self, positions, world_size, perception_ranges, hunter_indices, blocker_indices, target_index, capture, episode_idx, step):
+    def _draw_frame(self, positions, world_size, perception_ranges, hunter_indices, blocker_indices, target_index, capture, episode_idx, step, target_true_pos=None, target_obs_pos=None, target_obs_err=None):
         fig, ax = plt.subplots(figsize=(6.8, 6.8), dpi=140)
         ax.set_xlim(-world_size, world_size)
         ax.set_ylim(-world_size, world_size)
@@ -505,6 +516,12 @@ class UavPursuitRunner(EnvRunner):
             pr = plt.Circle((traj[-1, 0], traj[-1, 1]), perception_ranges["target"], color=palette["target"], alpha=0.08)
             ax.add_patch(pr)
             ax.text(traj[-1, 0], traj[-1, 1], "Target", fontsize=8)
+            if target_obs_pos is not None:
+                ax.scatter(target_obs_pos[0], target_obs_pos[1], color="#ff7f0e", marker="x", s=55)
+                ax.text(target_obs_pos[0], target_obs_pos[1], "Obs", fontsize=8)
+                if target_obs_err is not None and target_obs_err > 0.0:
+                    err_circle = plt.Circle((target_obs_pos[0], target_obs_pos[1]), target_obs_err, color="#ff7f0e", alpha=0.12, linestyle="--", fill=True)
+                    ax.add_patch(err_circle)
 
         status = "Captured" if capture else "Not captured"
         ax.text(0.02, 0.98, f"Status: {status}", transform=ax.transAxes, fontsize=10, verticalalignment="top", bbox=dict(facecolor="white", alpha=0.8, edgecolor="none"))

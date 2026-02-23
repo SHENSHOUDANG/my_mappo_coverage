@@ -1,17 +1,19 @@
 num_hunters: 3
 num_blockers: 0
-world_size: 1.5
-dt: 0.08
-capture_radius: 0.09
-capture_steps: 6
-episode_length: 150
-seed: 404
-initial_positions:
-  - [-0.9, 0.0]
-  - [-0.7, 0.4]
-  - [-0.7, -0.4]
-  - [0.8, 0.0]
-target_policy_source: train
-target_patrol_route_id: "002"
-target_policy_model_path: null
-eval_target_modes: [patrol, train]
+world_size: 0.8
+dt: 0.1
+capture_radius: 0.12
+capture_steps: 5
+episode_length: 100
+seed: 2314
+initial_positions: null
+target_patrol_route_id: '002'
+eval_target_modes:
+- patrol
+- train
+max_speed_hunter: 0.119
+max_speed_blocker: 0.0
+max_speed_target: 0.094
+perception_hunter: 0.25
+perception_blocker: 0.0
+perception_target: 0.342
