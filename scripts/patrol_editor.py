@@ -29,6 +29,8 @@ class PatrolEditorApp:
         self.route_visible_vars: list[tk.BooleanVar] = []
         self.route_row_frames: list[tk.Frame] = []
         self.route_row_labels: list[tk.Label] = []
+        self.select_all_var = tk.BooleanVar(value=True)
+        self._updating_select_all = False
         self.dirty = False
 
         self.canvas_size = 680
@@ -69,6 +71,17 @@ class PatrolEditorApp:
         self.route_panel = tk.Frame(right, width=300, height=340, bd=1, relief=tk.SOLID)
         self.route_panel.pack(fill=tk.X, pady=(4, 8))
         self.route_panel.pack_propagate(False)
+
+        self.select_all_checkbox = tk.Checkbutton(
+            self.route_panel,
+            text="Show All",
+            variable=self.select_all_var,
+            command=self.on_toggle_all_visible,
+            anchor="w",
+            padx=4,
+            pady=2,
+        )
+        self.select_all_checkbox.pack(fill=tk.X)
 
         self.route_rows_container = tk.Frame(self.route_panel)
         self.route_rows_container.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
@@ -163,6 +176,7 @@ class PatrolEditorApp:
         if not path.exists():
             self.data = {"meta": dict(DEFAULT_META), "routes": []}
             self.json_path = path
+            self.route_visible = []
             self.file_var.set(f"File: {self.json_path}")
             self.refresh_route_list()
             self.refresh_canvas()
@@ -239,13 +253,14 @@ class PatrolEditorApp:
             npts = len(route.get("waypoints", []))
             lbl = tk.Label(row, text=f"{idx + 1:02d}. {route['name']} ({npts} pts)", anchor="w")
             lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 2))
-            lbl.bind("<Button-1>", lambda _e, i=idx: self.select_route_by_index(i))
-            row.bind("<Button-1>", lambda _e, i=idx: self.select_route_by_index(i))
+            lbl.bind("<Button-1>", lambda _e, i=idx: self.select_route_by_index(i, ensure_visible=True))
+            row.bind("<Button-1>", lambda _e, i=idx: self.select_route_by_index(i, ensure_visible=True))
 
             self.route_visible_vars.append(visible_var)
             self.route_row_frames.append(row)
             self.route_row_labels.append(lbl)
 
+        self._sync_select_all_checkbox()
         self._style_route_rows()
 
     def _ensure_visibility_length(self) -> None:
@@ -266,14 +281,35 @@ class PatrolEditorApp:
         if not (0 <= idx < len(self.route_visible_vars)):
             return
         self.route_visible[idx] = bool(self.route_visible_vars[idx].get())
-        self.select_route_by_index(idx)
+        self._sync_select_all_checkbox()
+        self.select_route_by_index(idx, ensure_visible=False)
         self.refresh_canvas()
 
-    def select_route_by_index(self, idx: int) -> None:
+    def _sync_select_all_checkbox(self) -> None:
+        all_visible = bool(self.route_visible) and all(self.route_visible)
+        self._updating_select_all = True
+        self.select_all_var.set(all_visible)
+        self._updating_select_all = False
+
+    def on_toggle_all_visible(self) -> None:
+        if self._updating_select_all:
+            return
+        visible = bool(self.select_all_var.get())
+        self.route_visible = [visible for _ in self.data["routes"]]
+        for idx, var in enumerate(self.route_visible_vars):
+            if idx < len(self.route_visible):
+                var.set(self.route_visible[idx])
+        self.refresh_canvas()
+
+    def select_route_by_index(self, idx: int, ensure_visible: bool = False) -> None:
         if self.draw_mode:
             return
         if not (0 <= idx < len(self.data["routes"])):
             return
+        if ensure_visible and idx < len(self.route_visible) and not self.route_visible[idx]:
+            self.route_visible[idx] = True
+            if idx < len(self.route_visible_vars):
+                self.route_visible_vars[idx].set(True)
         self.selected_index = idx
         route = self.data["routes"][idx]
         self._style_route_rows()
