@@ -1,0 +1,17 @@
+world_size: 300.0
+seed: 1
+
+Hunter:
+  perception_radius: 25
+  max_velo: 20
+
+Explorer:
+  perception_radius: 80
+  max_velo: 10
+
+Target: 
+  perception_radius: 40
+  max_velo: 12
+  policy_type: 'patrol'   # choices: ['patrol', 'random', 'learn']
+  patrol_path: 'datasets/patrol_routes.json'
+  patrol_names: "square"
