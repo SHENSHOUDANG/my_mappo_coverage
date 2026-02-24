@@ -81,6 +81,8 @@ def generate_route(rng: random.Random, n_points: int) -> list[list[float]]:
         x = clamp01(cx + r * math.cos(angle))
         y = clamp01(cy + r * math.sin(angle))
         points.append([x, y])
+    if rng.random() < 0.5:
+        points.reverse()
     return points
 
 

@@ -83,8 +83,35 @@ class PatrolEditorApp:
         )
         self.select_all_checkbox.pack(fill=tk.X)
 
-        self.route_rows_container = tk.Frame(self.route_panel)
-        self.route_rows_container.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self.route_scroll_frame = tk.Frame(self.route_panel)
+        self.route_scroll_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=(0, 2))
+
+        self.route_list_canvas = tk.Canvas(
+            self.route_scroll_frame,
+            bg=self.root.cget("bg"),
+            highlightthickness=0,
+            bd=0,
+        )
+        self.route_scrollbar = tk.Scrollbar(
+            self.route_scroll_frame,
+            orient=tk.VERTICAL,
+            command=self.route_list_canvas.yview,
+        )
+        self.route_list_canvas.configure(yscrollcommand=self.route_scrollbar.set)
+
+        self.route_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.route_list_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.route_rows_container = tk.Frame(self.route_list_canvas, bg=self.root.cget("bg"))
+        self.route_rows_window_id = self.route_list_canvas.create_window(
+            (0, 0),
+            window=self.route_rows_container,
+            anchor="nw",
+        )
+        self.route_rows_container.bind("<Configure>", self._on_route_rows_configure)
+        self.route_list_canvas.bind("<Configure>", self._on_route_canvas_configure)
+        self._bind_route_scroll_events(self.route_list_canvas)
+        self._bind_route_scroll_events(self.route_rows_container)
 
         btn_frame = tk.Frame(right)
         btn_frame.pack(fill=tk.X)
@@ -237,7 +264,7 @@ class PatrolEditorApp:
             self.selected_index = None
 
         for idx, route in enumerate(self.data["routes"]):
-            row = tk.Frame(self.route_rows_container)
+            row = tk.Frame(self.route_rows_container, bg=self.root.cget("bg"))
             row.pack(fill=tk.X, pady=1)
 
             visible_var = tk.BooleanVar(value=self.route_visible[idx])
@@ -255,6 +282,9 @@ class PatrolEditorApp:
             lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 2))
             lbl.bind("<Button-1>", lambda _e, i=idx: self.select_route_by_index(i, ensure_visible=True))
             row.bind("<Button-1>", lambda _e, i=idx: self.select_route_by_index(i, ensure_visible=True))
+            self._bind_route_scroll_events(row)
+            self._bind_route_scroll_events(chk)
+            self._bind_route_scroll_events(lbl)
 
             self.route_visible_vars.append(visible_var)
             self.route_row_frames.append(row)
@@ -262,6 +292,7 @@ class PatrolEditorApp:
 
         self._sync_select_all_checkbox()
         self._style_route_rows()
+        self.root.after_idle(self._update_route_scrollregion)
 
     def _ensure_visibility_length(self) -> None:
         route_count = len(self.data["routes"])
@@ -315,6 +346,36 @@ class PatrolEditorApp:
         self._style_route_rows()
         self.refresh_canvas()
         self.set_status(f"Selected route '{route['name']}' with {len(route['waypoints'])} points.")
+
+    def _on_route_rows_configure(self, _event=None) -> None:
+        self._update_route_scrollregion()
+
+    def _on_route_canvas_configure(self, event: tk.Event) -> None:
+        self.route_list_canvas.itemconfigure(self.route_rows_window_id, width=event.width)
+        self._update_route_scrollregion()
+
+    def _update_route_scrollregion(self) -> None:
+        bbox = self.route_list_canvas.bbox("all")
+        if bbox is not None:
+            self.route_list_canvas.configure(scrollregion=bbox)
+
+    def _bind_route_scroll_events(self, widget: tk.Widget) -> None:
+        widget.bind("<MouseWheel>", self._on_route_mousewheel)
+        widget.bind("<Button-4>", self._on_route_mousewheel)
+        widget.bind("<Button-5>", self._on_route_mousewheel)
+
+    def _on_route_mousewheel(self, event: tk.Event):
+        if getattr(event, "num", None) == 4:
+            step = -1
+        elif getattr(event, "num", None) == 5:
+            step = 1
+        else:
+            delta = int(getattr(event, "delta", 0))
+            if delta == 0:
+                return "break"
+            step = -1 if delta > 0 else 1
+        self.route_list_canvas.yview_scroll(step, "units")
+        return "break"
 
     def refresh_canvas(self) -> None:
         self.canvas.delete("all")
@@ -467,6 +528,8 @@ class PatrolEditorApp:
             x = self._clamp01(cx + r * math.cos(a))
             y = self._clamp01(cy + r * math.sin(a))
             points.append([x, y])
+        if random.random() < 0.5:
+            points.reverse()
         return points
 
     def add_random_route(self) -> None:
@@ -643,7 +706,7 @@ class PatrolEditorApp:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Visual editor for patrol route JSON files.")
     parser.add_argument(
-        "--json",
+        "json",
         default="datasets/patrol_routes.json",
         help="Path to patrol route JSON file (default: datasets/patrol_routes.json)",
     )
