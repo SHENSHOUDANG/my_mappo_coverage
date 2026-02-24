@@ -15,6 +15,10 @@ import json
 import os
 
 import numpy as np
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 
 class BaseAgent(object):
@@ -304,6 +308,8 @@ class UAVPursuitEnv(object):
         self.shared_target_vel = np.zeros(2, dtype=np.float32)
         self.shared_target_valid = False
         self.last_seen_age = 0
+        self.last_episode_captured = False
+        self.last_capture_step = None
 
         # 步骤4：初始化Agent对象
         patrol_routes = self._load_patrol_routes(
@@ -361,6 +367,8 @@ class UAVPursuitEnv(object):
         self.capture_counter[:] = 0
         self.shared_target_valid = False
         self.last_seen_age = 0
+        self.last_episode_captured = False
+        self.last_capture_step = None
 
         # 步骤2：随机初始化所有agent
         for agent in self.agents:
@@ -413,6 +421,9 @@ class UAVPursuitEnv(object):
             if captured:
                 self.target.alive = False
                 self.target.velocity[:] = 0.0
+                self.last_episode_captured = True
+                if self.last_capture_step is None:
+                    self.last_capture_step = int(self.step_count + 1)
 
         # 步骤4：奖励聚合（基础奖励 + 速度惩罚）
         rewards += self._base_rewards(captured)
@@ -446,6 +457,112 @@ class UAVPursuitEnv(object):
             for a in self.agents
         ]
         return [obs, rews, dones, infos]
+
+    def render(self, mode="rgb_array", title=None):
+        """
+        功能:
+            渲染当前场景，用于训练/评估GIF生成。
+        输入:
+            mode (str): 渲染模式，支持\"rgb_array\"与\"human\"。
+            title (str | None): 可选标题文本；None时使用默认标题。
+        输出:
+            np.ndarray | None: mode为rgb_array时返回RGB图像；human时返回None。
+        """
+        # Step 1: 仅支持两种渲染模式
+        if mode not in ("rgb_array", "human"):
+            raise NotImplementedError(f"Unsupported render mode: {mode}")
+
+        # Step 2: 创建画布并设置坐标范围
+        fig, ax = plt.subplots(figsize=(6.4, 6.4), dpi=100)
+        ws = float(self.world_size)
+        ax.set_xlim(-ws, ws)
+        ax.set_ylim(-ws, ws)
+        ax.set_aspect("equal", adjustable="box")
+        ax.grid(True, linestyle="--", linewidth=0.3, alpha=0.3)
+        ax.set_xlabel("x (m)")
+        ax.set_ylabel("y (m)")
+
+        # Step 3: 标题信息（含捕获状态与步数）
+        if title is None:
+            capture_text = "Success" if self.last_episode_captured else "Running/Failed"
+            capture_step_text = (
+                str(int(self.last_capture_step)) if self.last_capture_step is not None else "NA"
+            )
+            title = f"Capture {capture_text} | Capture Step {capture_step_text} | EnvStep {int(self.step_count)}"
+        ax.set_title(title)
+
+        # Step 4: 绘制轨迹渐隐、当前位置和感知半径
+        hunter_colors = ["#1f77b4", "#2ca02c", "#ff7f0e", "#17becf", "#8c564b"]
+        hunter_idx = 0
+        for agent in self.agents:
+            if agent.role == "hunter":
+                color = hunter_colors[hunter_idx % len(hunter_colors)]
+                radius = float(self.hunter_perception_radius)
+                marker = "o"
+                hunter_idx += 1
+            else:
+                color = "#d62728"
+                radius = float(self.target_perception_radius)
+                marker = "s"
+
+            traj = np.asarray(agent.trajectory, dtype=np.float32)
+            if len(traj) >= 2:
+                for i in range(1, len(traj)):
+                    alpha = max(0.08, float(i) / float(len(traj)))
+                    ax.plot(
+                        traj[i - 1 : i + 1, 0],
+                        traj[i - 1 : i + 1, 1],
+                        color=color,
+                        linewidth=2.0,
+                        alpha=0.65 * alpha,
+                    )
+
+            pos = np.asarray(agent.position, dtype=np.float32)
+            alive = bool(agent.alive)
+            ax.scatter(
+                [pos[0]],
+                [pos[1]],
+                c=[color],
+                marker=marker,
+                s=70,
+                alpha=1.0 if alive else 0.35,
+                edgecolors="black",
+                linewidths=0.5,
+            )
+            ax.add_patch(
+                plt.Circle(
+                    (float(pos[0]), float(pos[1])),
+                    radius,
+                    color=color,
+                    fill=False,
+                    linestyle=":",
+                    linewidth=1.0,
+                    alpha=0.30 if alive else 0.15,
+                )
+            )
+
+        # Step 5: 返回RGB数组或直接展示
+        if mode == "human":
+            plt.show(block=False)
+            plt.pause(0.001)
+            plt.close(fig)
+            return None
+
+        fig.canvas.draw()
+        image = np.asarray(fig.canvas.buffer_rgba(), dtype=np.uint8)[..., :3].copy()
+        plt.close(fig)
+        return image
+
+    def close(self):
+        """
+        功能:
+            关闭环境绘图资源。
+        输入:
+            无。
+        输出:
+            无。
+        """
+        plt.close("all")
 
     def _team_sees_target(self):
         """

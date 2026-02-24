@@ -53,11 +53,11 @@ class DummyVecEnv():
         for env in self.envs:
             env.close()
 
-    def render(self, mode="human"):
+    def render(self, mode="human", **kwargs):
         if mode == "rgb_array":
-            return np.array([env.render(mode=mode) for env in self.envs])
+            return np.array([env.render(mode=mode, **kwargs) for env in self.envs])
         elif mode == "human":
             for env in self.envs:
-                env.render(mode=mode)
+                env.render(mode=mode, **kwargs)
         else:
             raise NotImplementedError

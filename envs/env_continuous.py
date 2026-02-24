@@ -122,16 +122,17 @@ class ContinuousActionEnv(object):
         """
         pass
 
-    def render(self, mode="rgb_array"):
+    def render(self, mode="rgb_array", **kwargs):
         """
         功能:
-            渲染环境（当前版本未实现渲染逻辑）。
+            渲染环境。
         输入:
             mode (str): 渲染模式标识。
+            **kwargs (dict): 透传给底层环境的渲染参数。
         输出:
-            无。
+            np.ndarray | None: RGB图像或None。
         """
-        pass
+        return self.env.render(mode=mode, **kwargs)
 
     def seed(self, seed):
         """

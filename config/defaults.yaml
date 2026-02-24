@@ -99,7 +99,7 @@ logging:
   log_interval: 5
 
 eval:
-  use_eval: false
+  use_eval: true
   val_interval: 100
   val_episodes: 5
   scenario_suite_val: datasets/val

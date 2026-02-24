@@ -35,7 +35,7 @@ env:
   target_patrol_switch_interval: 10
 
 Hunter:
-  perception_radius: 25
+  perception_radius: 50
   max_velo: 20
 
 Explorer:
@@ -43,7 +43,7 @@ Explorer:
   max_velo: 10
 
 Target: 
-  perception_radius: 40
+  perception_radius: 60
   max_velo: 12
 
 # UAV pursuit scenario settings
