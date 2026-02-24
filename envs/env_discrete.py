@@ -5,8 +5,12 @@
 # @File    : env_discrete.py
 """
 
-import gym
-from gym import spaces
+try:
+    import gym
+    from gym import spaces
+except ImportError:  # pragma: no cover
+    import gymnasium as gym
+    from gymnasium import spaces
 import numpy as np
 from envs.env_core import EnvCore
 
@@ -17,8 +21,9 @@ class DiscreteActionEnv(object):
     Wrapper for discrete action environment.
     """
 
-    def __init__(self):
-        self.env = EnvCore()
+    def __init__(self, config):
+        # 与连续环境保持一致，离散包装器也接收分层配置对象。
+        self.env = EnvCore(config)
         self.num_agent = self.env.agent_num
 
         self.signal_obs_dim = self.env.obs_dim

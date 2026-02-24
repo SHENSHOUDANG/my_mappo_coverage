@@ -1,5 +1,9 @@
-import gym
-from gym import spaces
+try:
+    import gym
+    from gym import spaces
+except ImportError:  # pragma: no cover
+    import gymnasium as gym
+    from gymnasium import spaces
 import numpy as np
 from envs.env_core import EnvCore
 
@@ -10,8 +14,10 @@ class ContinuousActionEnv(object):
     Wrapper for continuous action environment.
     """
 
-    def __init__(self):
-        self.env = EnvCore()
+    def __init__(self, config):
+        # EnvCore 读取合并后的配置（defaults.yaml + 用户yaml）
+        # 并构建实际的 UAV Pursuit 环境。
+        self.env = EnvCore(config)
         self.num_agent = self.env.agent_num
 
         self.signal_obs_dim = self.env.obs_dim
@@ -30,10 +36,15 @@ class ContinuousActionEnv(object):
         share_obs_dim = 0
         total_action_space = []
         for agent in range(self.num_agent):
-            # physical action space
+            # 动作空间使用 [-1, 1] 的归一化控制量：
+            # - policy 网络输出 action_norm ∈ [-1, 1]
+            # - 环境内由 BaseAgent.step 做物理映射：
+            #   velocity(米/秒) = action_norm * role_max_speed
+            # 这样可避免高斯策略输出无界动作带来的不稳定问题，
+            # 且与 agent_docs/pursuit_role.md 的定义保持一致。
             u_action_space = spaces.Box(
-                low=-np.inf,
-                high=+np.inf,
+                low=-1.0,
+                high=1.0,
                 shape=(self.signal_action_dim,),
                 dtype=np.float32,
             )
@@ -64,6 +75,17 @@ class ContinuousActionEnv(object):
 
     def step(self, actions):
         """
+        功能:
+            将向量化动作传入底层环境并返回标准化后的step结果。
+        输入:
+            actions (np.ndarray | list): shape=(agent_num, action_dim) 的动作集合。
+        输出:
+            tuple:
+                - obs: np.ndarray, shape=(agent_num, obs_dim)
+                - rews: np.ndarray, shape=(agent_num, 1)
+                - dones: np.ndarray, shape=(agent_num,)
+                - infos: list[dict], 长度=agent_num
+
         输入actions维度假设：
         # actions shape = (5, 2, 5)
         # 5个线程的环境，里面有2个智能体，每个智能体的动作是一个one_hot的5维编码
@@ -78,14 +100,46 @@ class ContinuousActionEnv(object):
         return np.stack(obs), np.stack(rews), np.stack(dones), infos
 
     def reset(self):
+        """
+        功能:
+            重置底层环境并返回初始观测。
+        输入:
+            无。
+        输出:
+            np.ndarray: shape=(agent_num, obs_dim)。
+        """
         obs = self.env.reset()
         return np.stack(obs)
 
     def close(self):
+        """
+        功能:
+            关闭环境资源（当前无显式资源需要释放）。
+        输入:
+            无。
+        输出:
+            无。
+        """
         pass
 
     def render(self, mode="rgb_array"):
+        """
+        功能:
+            渲染环境（当前版本未实现渲染逻辑）。
+        输入:
+            mode (str): 渲染模式标识。
+        输出:
+            无。
+        """
         pass
 
     def seed(self, seed):
-        pass
+        """
+        功能:
+            设置底层环境随机种子。
+        输入:
+            seed (int): 随机种子。
+        输出:
+            无。
+        """
+        self.env.seed(seed)

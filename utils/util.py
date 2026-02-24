@@ -2,13 +2,38 @@ import numpy as np
 import math
 import torch
 import yaml
+import os
 from easydict import EasyDict as edict
 
+
+def _deep_merge(base, override):
+    merged = dict(base)
+    for key, value in override.items():
+        if (
+            key in merged
+            and isinstance(merged[key], dict)
+            and isinstance(value, dict)
+        ):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def load_config(path):
+    default_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "config",
+        "defaults.yaml",
+    )
+    with open(default_path, "r", encoding="utf-8") as f:
+        defaults = yaml.safe_load(f) or {}
+
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
-    
-    return edict(data)
+
+    merged = _deep_merge(defaults, data)
+    return edict(merged)
 
 def check(input):
     if type(input) == np.ndarray:
