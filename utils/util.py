@@ -1,6 +1,14 @@
 import numpy as np
 import math
 import torch
+import yaml
+from easydict import EasyDict as edict
+
+def load_config(path):
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    
+    return edict(data)
 
 def check(input):
     if type(input) == np.ndarray:

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import torch
 
-from mappo.config import get_config
+from config import get_config, load_yaml_config
 
 from mappo.envs.mpe.MPE_env import MPEEnv
 from mappo.envs.env_wrappers import SubprocVecEnv, DummyVecEnv
@@ -31,21 +31,10 @@ def make_render_env(all_args):
     else:
         return SubprocVecEnv([get_env_fn(i) for i in range(all_args.n_rollout_threads)])
 
-def parse_args(args, parser):
-    parser.add_argument('--scenario_name', type=str,
-                        default='simple_spread', help="Which scenario to run on")
-    parser.add_argument("--num_landmarks", type=int, default=3)
-    parser.add_argument('--num_agents', type=int,
-                        default=2, help="number of players")
-
-    all_args = parser.parse_known_args(args)[0]
-
-    return all_args
-
-
 def main(args):
     parser = get_config()
-    all_args = parse_args(args, parser)
+    config_args = parser.parse_args(args)
+    all_args = load_yaml_config(config_args.config_file)
 
     if all_args.algorithm_name == "rmappo" or all_args.algorithm_name == "rmappg":
         assert (

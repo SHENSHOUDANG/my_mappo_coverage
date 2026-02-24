@@ -13,6 +13,7 @@ import setproctitle
 import numpy as np
 from pathlib import Path
 import torch
+import argparse
 
 # Get the parent directory of the current file
 parent_dir = os.path.abspath(os.path.join(os.getcwd(), "."))
@@ -21,6 +22,7 @@ parent_dir = os.path.abspath(os.path.join(os.getcwd(), "."))
 sys.path.append(parent_dir)
 
 from config import get_config
+from utils.util import load_config
 from envs.env_wrappers import DummyVecEnv
 
 """Train script for MPEs."""
@@ -65,42 +67,40 @@ def make_eval_env(all_args):
 
     return DummyVecEnv([get_env_fn(i) for i in range(all_args.n_rollout_threads)])
 
-
-def parse_args(args, parser):
-    parser.add_argument("--scenario_name", type=str, default="MyEnv", help="Which scenario to run on")
-    parser.add_argument("--num_landmarks", type=int, default=3)
-    parser.add_argument("--num_agents", type=int, default=2, help="number of players")
-
-    all_args = parser.parse_known_args(args)[0]
-
-    return all_args
-
+parser = argparse.ArgumentParser(
+        description="mappo-pursuit", formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+parser.add_argument(
+    "--config_file",
+    type=str,
+    required=True,
+    help="Path to YAML config file",
+)
+parser.add_argument(
+    "--cuda",
+    action='store_true',
+    help="Use GPU or not",
+)
 
 def main(args):
-    parser = get_config()
-    all_args = parse_args(args, parser)
+    all_args = load_config(args.config_file)
 
-    if all_args.algorithm_name == "rmappo":
+    if all_args.exp.algorithm_name == "rmappo":
         assert all_args.use_recurrent_policy or all_args.use_naive_recurrent_policy, "check recurrent policy!"
-    elif all_args.algorithm_name == "mappo":
+    elif all_args.exp.algorithm_name == "mappo":
         assert (
             all_args.use_recurrent_policy == False and all_args.use_naive_recurrent_policy == False
         ), "check recurrent policy!"
     else:
         raise NotImplementedError
 
-    assert (
-        all_args.share_policy == True and all_args.scenario_name == "simple_speaker_listener"
-    ) == False, "The simple_speaker_listener scenario can not use shared policy. Please check the config.py."
-
     # cuda
-    if all_args.cuda and torch.cuda.is_available():
+    if args.cuda and torch.cuda.is_available():
         print("choose to use gpu...")
         device = torch.device("cuda:0")
         torch.set_num_threads(all_args.n_training_threads)
-        if all_args.cuda_deterministic:
-            torch.backends.cudnn.benchmark = False
-            torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
     else:
         print("choose to use cpu...")
         device = torch.device("cpu")
@@ -109,8 +109,7 @@ def main(args):
     # run dir
     run_dir = (
         Path(os.path.split(os.path.dirname(os.path.abspath(__file__)))[0] + "/results")
-        / all_args.env_name
-        / all_args.scenario_name
+        / all_args.exp.env_name
         / all_args.algorithm_name
         / all_args.experiment_name
     )
@@ -139,8 +138,6 @@ def main(args):
         + str(all_args.env_name)
         + "-"
         + str(all_args.experiment_name)
-        + "@"
-        + str(all_args.user_name)
     )
 
     # seed
@@ -181,4 +178,5 @@ def main(args):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    args = parser.parse_args()
+    main(args)

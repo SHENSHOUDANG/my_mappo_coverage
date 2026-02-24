@@ -1,7 +1,10 @@
 import argparse
+from pathlib import Path
+
+import yaml
 
 
-def get_config():
+def _build_full_parser():
     """
     The configuration parser for common hyperparameters of all environment.
     Please reach each `scripts/train/<env>_runner.py` file to find private hyperparameters
@@ -224,6 +227,9 @@ def get_config():
         default=False,
         help="Whether to use global state or concatenated obs",
     )
+    parser.add_argument("--scenario_name", type=str, default="MyEnv", help="Which scenario to run on")
+    parser.add_argument("--num_landmarks", type=int, default=3)
+    parser.add_argument("--num_agents", type=int, default=2, help="number of players")
 
     # replay buffer parameters
     parser.add_argument("--episode_length", type=int, default=200, help="Max length for any episode")
@@ -494,4 +500,39 @@ def get_config():
         help="by default None. set the path to pretrained model.",
     )
 
+    return parser
+
+
+def get_default_args():
+    return _build_full_parser().parse_args([])
+
+
+def load_yaml_config(config_file):
+    config_path = Path(config_file).expanduser()
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
+    with config_path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+
+    if not isinstance(data, dict):
+        raise ValueError("Config file must contain a top-level mapping of key-value pairs.")
+
+    merged = vars(get_default_args())
+    for key, value in data.items():
+        merged[key] = value
+
+    return argparse.Namespace(**merged)
+
+
+def get_config():
+    parser = argparse.ArgumentParser(
+        description="onpolicy", formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--config_file",
+        type=str,
+        required=True,
+        help="Path to YAML config file",
+    )
     return parser

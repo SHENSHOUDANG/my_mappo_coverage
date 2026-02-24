@@ -1,26 +1,38 @@
 # Repository Guidelines
 
-## What can this project do
-`light_mappo` is a lightweight MAPPO training stack centered on a Multi-UAV pursuit-evasion environment. It provides configurable training/evaluation runners, a pursuit scenario with optional target patrol routes, and TensorBoard logging plus saved artifacts under `results/`.
-
 ## Project Structure & Module Organization
-`algorithms/` contains MAPPO core implementations and utilities (policy, actor-critic, RNN/CNN/MLP helpers). `envs/` holds environment wrappers and example discrete/continuous envs, plus `uav_pursuit_env.py`. `runner/` orchestrates training loops (shared vs separated policies). `train/` contains the entry script `train_uav_pursuit.py`. `config/` stores YAML configs (including patrol routes). `scripts/` includes helpers like the patrol route editor and MPE rendering. Outputs go to `results/`. Common utilities live in `utils/`, and CLI defaults are defined in `parameters.py`.
+This repository hosts `light_mappo`, a lightweight MAPPO training stack centered on a Multi‑UAV pursuit‑evasion environment. Key directories:
+- `algorithms/`: MAPPO core implementations (policy, actor‑critic, RNN/CNN/MLP helpers).
+- `envs/`: environment wrappers and examples, including `uav_pursuit_env.py`.
+- `runner/`: training loop orchestration (shared vs separated policies).
+- `train/`: entry script `train.py`.
+- `config/`: YAML configs (including patrol routes).
+- `scripts/`: utilities (patrol route editor, MPE rendering).
+- `utils/`: shared utilities.
+- `results/`: training outputs (logs, artifacts).
+
+## Multi-UAV Pursuit Task
+The MAPPO in Multi-UAV Pursuit Task. 其具体环境配置可以参考文件：
+@./agent_docs/pursuit_role.md
 
 ## Build, Test, and Development Commands
-This project is run directly with Python (no build step) and should use YAML configs rather than long CLI arg lists.
-- `python train/train_uav_pursuit.py --config config/pursuit3v1.yaml` is the standard training command.
-- `python train/train_uav_pursuit.py --config config/minimal_test.yaml` is the quick testing command.
-
-
+This project runs directly with Python and prefers YAML configs over long CLI argument lists.
+其需要借助config中的.yaml配置文件来开启一段训练
 
 ## Coding Style & Naming Conventions
-Python code follows standard PEP 8 conventions: 4-space indentation, `snake_case` for functions/variables, and `CamelCase` for classes. Keep imports grouped (stdlib, third-party, local). There is no enforced formatter/linter; keep changes consistent with surrounding code and avoid large reformat-only diffs. YAML configs live in `config/` and should use clear, lower_snake_case keys.
+Follow PEP 8 with 4‑space indentation. Use `snake_case` for functions/variables and `CamelCase` for classes. Keep imports grouped as stdlib, third‑party, then local. No enforced formatter; keep edits consistent with surrounding code and avoid large reformat‑only diffs. YAML keys should be clear `lower_snake_case`.
 
 ## Testing Guidelines
-There is no dedicated unit test suite. Validate changes by running a short config-based training job (e.g., `config/minimal_test.yaml`) and confirming a new run folder appears under `results/` with logs and (if enabled) GIFs. If you touch environment logic, run the UAV pursuit script with a full config to catch runtime regressions.
+There is no dedicated unit test suite. 
 
 ## Commit & Pull Request Guidelines
-Recent commits use short, imperative subject lines (e.g., “Update config”, “Add patrol routes control”). Follow that pattern and keep subjects under ~60 characters. PRs should include: a concise summary, configs/CLI args used, and any artifacts (log snippets, GIFs in `results/`). Link related issues when applicable and call out breaking changes or new dependencies.
+Commit messages should be short, imperative, and under ~60 characters (e.g., “Update config”). Pull requests should include:
+- A concise summary of changes.
+- Configs and CLI args used.
+- Any artifacts (log snippets, GIFs in `results/`).
+- Linked issues and notes on breaking changes or new dependencies.
 
 ## Configuration & Outputs
-Prefer YAML configs via `--config` for reproducibility. Training artifacts are written to `results/<env>/<scenario>/<algorithm>/<experiment_name>/run*/`. Keep large generated files out of PRs unless explicitly requested.
+Prefer `--config` YAML files for reproducibility. Outputs are written to:
+`results/<env>/<scenario>/<algorithm>/<experiment_name>/run*/`.
+Keep large generated files out of PRs unless explicitly requested.
