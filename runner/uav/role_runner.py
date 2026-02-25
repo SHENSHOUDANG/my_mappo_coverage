@@ -61,7 +61,7 @@ class RoleBasedRunner(object):
         # Step 2: 读取训练主参数
         self.num_hunters = int(self.cfg.env.num_hunters)
         self.target_index = self.num_agents - 1
-        self.target_trainable = str(self.cfg.env.target_policy_source).lower() == "train"
+        self.target_trainable = str(self.cfg.env.target_policy_source).lower() == "learn"
 
         self.episode_length = int(self.cfg.env.episode_length)
         self.n_rollout_threads = int(self.cfg.exp.n_rollout_threads)
@@ -118,6 +118,7 @@ class RoleBasedRunner(object):
         self.role_trainers = {}
         role_represent_agent = {"hunter": 0}
         if self.target_trainable:
+            print("Training Target Policy ...")
             role_represent_agent["target"] = self.target_index
 
         for role_name, rep_agent_id in role_represent_agent.items():
@@ -257,12 +258,23 @@ class RoleBasedRunner(object):
                     self.role_trainers[role_name].policy.lr_decay(episode, episodes)
 
             do_eval_this_episode = self.use_eval and episode % max(1, self.eval_interval) == 0
-            train_frames = []
+            train_frames = [[] for _ in range(self.n_rollout_threads)]
+            train_gif_finished = np.zeros(self.n_rollout_threads, dtype=bool)
             episode_hunter_reward = 0.0
             episode_target_reward = 0.0
             last_infos = None
 
             for step in range(self.episode_length):
+                # 训练GIF采样：按每个训练环境独立采集，done后停止该环境采样。
+                # 注意 DummyVecEnv.step 会在done后自动reset，故必须在step前采样，避免跨episode拼接。
+                if do_eval_this_episode:
+                    frame_batch = self.envs.render(mode="rgb_array", title=f"Train Episode {int(episode)}")
+                    if isinstance(frame_batch, np.ndarray):
+                        max_envs = min(self.n_rollout_threads, frame_batch.shape[0])
+                        for env_i in range(max_envs):
+                            if not train_gif_finished[env_i]:
+                                train_frames[env_i].append(frame_batch[env_i].copy())
+
                 # Sample actions
                 (
                     values,
@@ -280,9 +292,9 @@ class RoleBasedRunner(object):
                 last_infos = infos
 
                 if do_eval_this_episode:
-                    frame_batch = self.envs.render(mode="rgb_array", title=f"Train Episode {int(episode)}")
-                    if isinstance(frame_batch, np.ndarray) and frame_batch.shape[0] > 0:
-                        train_frames.append(frame_batch[0].copy())
+                    for env_i in range(self.n_rollout_threads):
+                        if not train_gif_finished[env_i] and bool(np.all(dones[env_i])):
+                            train_gif_finished[env_i] = True
 
                 data = (
                     obs,
@@ -339,11 +351,9 @@ class RoleBasedRunner(object):
 
             # eval + train gif
             if do_eval_this_episode:
-                train_gif_path = Path(self.gif_dir) / f"train_{int(episode)}.gif"
-                print(
-                    f"\t Save GIF to {train_gif_path}\n"
-                )
-                self._save_gif(train_frames, train_gif_path)
+                for env_i in range(self.n_rollout_threads):
+                    train_gif_path = Path(self.gif_dir) / f"train_{int(episode)}_env_{int(env_i)}.gif"
+                    self._save_gif(train_frames[env_i], train_gif_path)
                 self.eval(total_num_steps, episode)
 
     def warmup(self):
