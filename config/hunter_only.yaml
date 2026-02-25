@@ -29,10 +29,10 @@ env:
   noisy_target_pos_std: 10  # max error percent
   noisy_target_vel_std: 10  # 
 
-  target_policy_source: train
+  target_policy_source: learn # Choices: ["learn", "patrol", "Random"]
   target_patrol_path: datasets/patrol_routes.json
   target_patrol_names: ["square", "ring"]
-  target_patrol_switch_interval: 10
+  target_switch_interval: 10
 
 Hunter:
   perception_radius: 50

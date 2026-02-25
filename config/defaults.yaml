@@ -27,7 +27,7 @@ env:
   target_policy_source: train
   target_patrol_path: datasets/patrol_routes.json
   target_patrol_names: []
-  target_patrol_switch_interval: 10
+  target_switch_interval: 10
 
 Hunter:
   perception_radius: 25
