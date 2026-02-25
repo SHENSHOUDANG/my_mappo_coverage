@@ -1,6 +1,6 @@
 exp:
   algorithm_name: mappo
-  experiment_name: hunter_only_patrol
+  experiment_name: hunter_only_seen_base_1v1
   seed: 1
   cuda: true
   cuda_deterministic: true
@@ -8,25 +8,25 @@ exp:
   n_rollout_threads: 5
   n_eval_rollout_threads: 1
   n_render_rollout_threads: 1
-  num_env_steps: 1000000 # total environment steps to train
+  num_env_steps: 2000000 # total environment steps to train
 
 # Environment settings (common)
 env:
-  env_name: uav_pursuit
-  world_size: 400
-  episode_length: 200 # max steps per episode
+  env_name: uav_pursuit_velo
+  world_size: 100
+  episode_length: 300 # max steps per episode
   dt: 0.1
   num_hunters: 3
   num_explorers: 0
 
-  capture_dis: 10
+  capture_dis: 20
   capture_step: 10
 
   collision_dis: 3
   
   target_pos_init_guidance_step: 10
   target_pos_guidance: true
-  noisy_target_pos_std: 10  # max error percent
+  noisy_target_pos_std: 2  # max error percent
   noisy_target_vel_std: 10  # 
 
   target_policy_source: learn # Choices: ["learn", "patrol", "Random"]
@@ -35,28 +35,38 @@ env:
   target_switch_interval: 10
 
 Hunter:
-  perception_radius: 50
+  perception_radius: -1
   max_velo: 20
+  control_mode: velocity  # Choices: ["acceleration", "velocity"]
+  max_acc: 8
+  max_turn_angle: 10
+  min_turn_limit_velo: 0.0
 
 Explorer:
-  perception_radius: 80
+  perception_radius: -1
   max_velo: 10
 
 Target: 
-  perception_radius: 60
+  perception_radius: -1
   max_velo: 12
+  control_mode: velocity
+  max_acc: 6
+  max_turn_angle: 10
+  min_turn_limit_velo: 0.0
 
 # UAV pursuit scenario settings
 reward:
-  collision_penalty_k: 5.0
+  collision_penalty_k: 0.0
+  hunter_capture_reward: 10.0
+  target_captured_penalty: 12.0
 
   lost_target_penalty: 0.1
   lost_target_penalty_age_scale: 0.02
 
+  speed_penalty: 0.02
+
   gif_interval: 10
   gif_frame_duration: 0.1
-
-  speed_penalty: 0.02
 
 # Model/network settings
 model:
@@ -114,7 +124,7 @@ logging:
 
 # Evaluation settings
 eval:
-  val_interval: 100
+  val_interval: 20
   val_episodes: 5
   scenario_suite_val: datasets/val
   scenario_suite_test: datasets/test
