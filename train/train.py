@@ -7,17 +7,17 @@ MAPPO training entry for Multi-UAV Pursuit.
 3) 仅在Runner内部需要初始化算法组件时，才进行扁平化参数映射。
 """
 
-import argparse
 import os
 import sys
+parent_dir = os.path.abspath(os.path.join(os.getcwd(), "."))
+sys.path.append(parent_dir)
+
+import argparse
 from pathlib import Path
 
 import numpy as np
 import setproctitle
 import torch
-
-parent_dir = os.path.abspath(os.path.join(os.getcwd(), "."))
-sys.path.append(parent_dir)
 
 from utils.util import load_config
 from envs.env_wrappers import DummyVecEnv
