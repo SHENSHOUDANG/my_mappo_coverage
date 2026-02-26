@@ -94,6 +94,8 @@ class RoleBasedRunner(object):
         self.log_csv_path = str(self.run_dir / "log.csv")
         self.eval_csv_path = str(self.run_dir / "eval.csv")
         self._init_csv_files()
+        self.gif_frame_interval = max(1, int(self.cfg.logging.gif_frame_interval))
+        self.gif_frame_duration = float(self.cfg.logging.gif_frame_duration)
         self.gif_start_step = int(getattr(self.cfg.render, "gif_start_step", max(0, self.episode_length // 2)))
         # 训练阶段默认仅绘制第0个rollout环境，降低开销；评估仍绘制全部eval环境。
         self.train_gif_env_ids = [0]
@@ -296,13 +298,20 @@ class RoleBasedRunner(object):
             for step in range(self.episode_length):
                 # 训练GIF采样：按每个训练环境独立采集，done后停止该环境采样。
                 # 注意 DummyVecEnv.step 会在done后自动reset，故必须在step前采样，避免跨episode拼接。
-                if do_eval_this_episode:
-                    frame_batch = self.envs.render(mode="rgb_array", title=f"Train Episode {int(episode)}")
-                    if isinstance(frame_batch, np.ndarray):
-                        max_envs = min(self.n_rollout_threads, frame_batch.shape[0])
-                        for env_i in range(max_envs):
-                            if env_i in self.train_gif_env_ids and not train_gif_finished[env_i]:
-                                train_frames[env_i].append(frame_batch[env_i].copy())
+                if do_eval_this_episode and step % self.gif_frame_interval == 0:
+                    # 仅渲染需要录制GIF的训练环境，避免不必要的全量渲染开销。
+                    for env_i in self.train_gif_env_ids:
+                        if env_i < 0 or env_i >= self.n_rollout_threads:        # 无效Env ID
+                            continue
+                        if train_gif_finished[env_i]:               # 已结束
+                            continue
+                        frame = self.envs.render(
+                            mode="rgb_array",
+                            env_id=int(env_i),
+                            title=f"Train Episode {int(episode)}",
+                        )
+                        if isinstance(frame, np.ndarray):
+                            train_frames[env_i].append(frame.copy())
 
                 # Sample actions
                 (
@@ -320,7 +329,7 @@ class RoleBasedRunner(object):
                 episode_target_reward += float(np.sum(rewards[:, self.target_index, 0]))
                 last_infos = infos
 
-                if do_eval_this_episode:
+                if do_eval_this_episode:        # 固定获取任务结束帧
                     for env_i in range(self.n_rollout_threads):
                         if not train_gif_finished[env_i] and bool(np.all(dones[env_i])):
                             terminal_frame = self._extract_terminal_frame(infos[env_i])
@@ -369,11 +378,11 @@ class RoleBasedRunner(object):
             if episode % self.log_interval == 0:
                 end = time.time()
                 elapsed = float(end - start)
-                fps = float(total_num_steps / (elapsed + 1e-6))
+                fps = float(total_num_steps / (elapsed + 1e-6))  # step / sec
                 progress = float((episode + 1) / max(1, episodes))
                 eta_sec = max(0.0, (self.num_env_steps - total_num_steps) / max(fps, 1e-6))
                 print(
-                    "\n Env {} Algo {} Exp {} updates {}/{} episodes, total num timesteps {}/{}, FPS {}.\n".format(
+                    "\n Env {} Algo {} Exp {} updates {}/{} episodes, total num timesteps {}/{}, FPS {} step/sec.\n".format(
                         self.env_name,
                         self.algorithm_name,
                         self.experiment_name,
@@ -651,11 +660,10 @@ class RoleBasedRunner(object):
         eval_frames = [[] for _ in range(n_env)]
 
         # Step 2: 记录初始帧
-        if self.gif_start_step <= 0:
-            frame_batch = self.eval_envs.render(mode="rgb_array", title=f"Eval Episode {int(episode)}")
-            if isinstance(frame_batch, np.ndarray):
-                for env_i in range(min(n_env, frame_batch.shape[0])):
-                    eval_frames[env_i].append(frame_batch[env_i].copy())
+        frame_batch = self.eval_envs.render(mode="rgb_array", title=f"Eval Episode {int(episode)}")
+        if isinstance(frame_batch, np.ndarray):
+            for env_i in range(min(n_env, frame_batch.shape[0])):
+                eval_frames[env_i].append(frame_batch[env_i].copy())
 
         # Step 3: rollout一个评估episode长度
         for eval_step in range(self.episode_length):
@@ -693,7 +701,7 @@ class RoleBasedRunner(object):
                         eval_frames[env_i].append(terminal_frame.copy())
                     env_finished[env_i] = True
 
-            if eval_step + 1 >= self.gif_start_step:
+            if (eval_step + 1) % self.gif_frame_interval == 0:
                 frame_batch = self.eval_envs.render(mode="rgb_array", title=f"Eval Episode {int(episode)}")
                 if isinstance(frame_batch, np.ndarray):
                     for env_i in range(min(n_env, frame_batch.shape[0])):
@@ -778,20 +786,15 @@ class RoleBasedRunner(object):
         if frames is None or len(frames) == 0:
             return
 
-        # Step 2: 抽样控制帧数，并在终止帧额外停留0.8秒便于观察结束状态。
-        fps = 10
-        max_core_frames = 30
-        if len(frames) > max_core_frames:
-            idx = np.linspace(0, len(frames) - 1, max_core_frames).astype(np.int32)
-            sampled_frames = [frames[i] for i in idx]
-        else:
-            sampled_frames = [f for f in frames]
+        # Step 2: 保留全部采样帧，不做抽帧限帧；每帧时长由配置控制。
+        sampled_frames = [f for f in frames]
 
-        terminal_hold_frames = 8  # 0.8s
-        sampled_frames.extend([sampled_frames[-1].copy() for _ in range(terminal_hold_frames)])
+        # Step 3: 终止帧额外停留0.8秒便于观察结束状态（依赖gif_frame_duration）。
+        hold_frames = max(1, int(round(0.8 / max(self.gif_frame_duration, 1e-6))))
+        sampled_frames.extend([sampled_frames[-1].copy() for _ in range(hold_frames)])
 
-        # Step 3: 写出GIF
-        imageio.mimsave(str(gif_path), sampled_frames, duration=1.0 / float(fps), loop=0)
+        # Step 4: 写出GIF
+        imageio.mimsave(str(gif_path), sampled_frames, duration=float(self.gif_frame_duration), loop=0)
 
     def _extract_terminal_frame(self, env_infos):
         """

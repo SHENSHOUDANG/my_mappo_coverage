@@ -1,6 +1,6 @@
 exp:
-  algorithm_name: mappo
-  experiment_name: base_colli_speed
+  algorithm_name: rmappo
+  experiment_name: vel3v1_base_colli_speed
   seed: 1
   cuda: true
   cuda_deterministic: true
@@ -12,9 +12,9 @@ exp:
 
 # Environment settings (common)
 env:
-  env_name: hunter_only_velo_3v1
+  env_name: hunter_only
   world_size: 100
-  episode_length: 300 # max steps per episode
+  episode_length: 256 # max steps per episode
   dt: 0.1
   num_hunters: 3
   num_explorers: 0
@@ -41,7 +41,7 @@ Hunter:
   control_mode: velocity  # Choices: ["acceleration", "velocity"]
   max_acc: 8
   max_turn_angle: 10
-  min_turn_limit_velo: 0.0
+  min_turn_limit_velo: 5.0
 
 Explorer:
   perception_radius: -1
@@ -55,7 +55,7 @@ Target:
   control_mode: velocity
   max_acc: 6
   max_turn_angle: 10
-  min_turn_limit_velo: 0.0
+  min_turn_limit_velo: 5.0
 
 # UAV pursuit scenario settings
 reward:
@@ -81,26 +81,15 @@ reward:
   lost_target_penalty: 0.1
   lost_target_penalty_age_scale: 0.02
 
-  gif_interval: 10
-  gif_frame_duration: 0.1
 
 # Model/network settings
 model:
   policy_share: true # whether all agents share the same policy
   use_centralized_V: true # centralized value function
-  stacked_frames: 1
-  use_stacked_frames: false
   hidden_size: 64
   layer_N: 1
-  use_ReLU: true
-  use_popart: false
-  use_valuenorm: true
-  use_feature_normalization: true
-  use_orthogonal: true
-  gain: 0.01
   use_naive_recurrent_policy: false
-  use_recurrent_policy: false
-  recurrent_N: 1
+  use_recurrent_policy: true
   data_chunk_length: 10
 
 # Optimizer settings
@@ -133,24 +122,6 @@ ppo:
 schedule:
   use_linear_lr_decay: false
 
-# Save/log settings
-logging:
-  save_interval: 1
-  log_interval: 5
-
-# Evaluation settings
-eval:
-  val_interval: 20
-  val_episodes: 5
-  scenario_suite_val: datasets/val
-  scenario_suite_test: datasets/test
-
-# Render settings
-render:
-  save_gifs: false
-  use_render: false
-  render_episodes: 5
-  ifi: 0.1
 
 # Pretrained model
 pretrained:

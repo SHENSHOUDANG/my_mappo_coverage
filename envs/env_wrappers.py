@@ -63,11 +63,22 @@ class DummyVecEnv():
         for env in self.envs:
             env.close()
 
-    def render(self, mode="human", **kwargs):
+    def render(self, mode="human", env_id=None, **kwargs):
         if mode == "rgb_array":
-            return np.array([env.render(mode=mode, **kwargs) for env in self.envs])
+            if env_id is None:
+                return np.array([env.render(mode=mode, **kwargs) for env in self.envs])
+            env_idx = int(env_id)
+            if env_idx < 0 or env_idx >= self.num_envs:
+                raise IndexError(f"env_id out of range: {env_idx}")
+            return self.envs[env_idx].render(mode=mode, **kwargs)
         elif mode == "human":
-            for env in self.envs:
-                env.render(mode=mode, **kwargs)
+            if env_id is None:
+                for env in self.envs:
+                    env.render(mode=mode, **kwargs)
+            else:
+                env_idx = int(env_id)
+                if env_idx < 0 or env_idx >= self.num_envs:
+                    raise IndexError(f"env_id out of range: {env_idx}")
+                self.envs[env_idx].render(mode=mode, **kwargs)
         else:
             raise NotImplementedError
