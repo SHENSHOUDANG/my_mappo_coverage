@@ -17,4 +17,5 @@ dependencies:
       - torchaudio==2.10.0
       - torchvision==0.25.0
       - easydict==1.13
+      - tqdm==4.67.3
 prefix: /home/evan/miniforge3/envs/mappo
