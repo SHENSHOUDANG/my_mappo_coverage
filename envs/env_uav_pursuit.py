@@ -24,6 +24,39 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
 
+def _safe_distance_penalty(
+    dist,
+    safe_dis,
+    collision_dis,
+    collision_penalty_k,
+    safe_zone_penalty_scale,
+):
+    """
+    功能:
+        根据安全距离与碰撞距离计算单agent的距离风险惩罚。
+    输入:
+        dist (float): 两agent间欧式距离（米）。
+        safe_dis (float): 当前agent安全距离阈值（米）。
+        collision_dis (float): 硬碰撞距离阈值（米）。
+        collision_penalty_k (float): 最大碰撞惩罚系数（硬碰撞）。
+        safe_zone_penalty_scale (float): 危险区惩罚相对硬碰撞惩罚的缩放系数。
+    输出:
+        float: 非负惩罚值（调用方再加负号累计到reward）。
+    """
+    safe_val = float(max(0.0, safe_dis))
+    coll_val = float(max(0.0, collision_dis))
+    if dist >= safe_val:    # 安全区
+        return 0.0
+    if dist <= coll_val:    # 碰撞区
+        return float(max(0.0, collision_penalty_k))
+    
+    # 危险惩罚区: 线性增长，但上限由safe_zone_penalty_scale控制，显著低于硬碰撞惩罚。
+    denom = max(safe_val - coll_val, 1e-6)
+    ratio = float(np.clip((safe_val - dist) / denom, 0.0, 1.0))
+    scale = float(np.clip(safe_zone_penalty_scale, 0.0, 1.0))
+    return float(max(0.0, collision_penalty_k)) * scale * ratio
+
+
 class BaseAgent(object):
     """
     Agent基础类，负责动作选择与运动学更新。
@@ -40,6 +73,7 @@ class BaseAgent(object):
         agent_id: int,
         role: str,
         max_speed: float,
+        safe_dis: float,
         control_mode: str = "velocity",
         max_acc: float = 0.0,
         max_turn_angle: float = 180.0,
@@ -51,6 +85,7 @@ class BaseAgent(object):
         self.agent_id = int(agent_id)
         self.role = role
         self.max_speed = float(max_speed)
+        self.safe_dis = float(max(0.0, safe_dis))
         self.control_mode = str(control_mode).lower()
         self.max_acc = float(max(0.0, max_acc))
         self.max_turn_angle = float(max_turn_angle)
@@ -204,6 +239,7 @@ class HunterAgent(BaseAgent):
         self,
         agent_id: int,
         max_speed: float,
+        safe_dis: float,
         control_mode: str = "velocity",
         max_acc: float = 0.0,
         max_turn_angle: float = 180.0,
@@ -217,6 +253,7 @@ class HunterAgent(BaseAgent):
         输入:
             agent_id (int): Hunter编号。
             max_speed (float): 最大速度（米/秒）。
+            safe_dis (float): 安全距离阈值（米）。
             control_mode (str): 控制模式（velocity/acceleration）。
             max_acc (float): acceleration模式下最大加速度（米/秒²）。
             max_turn_angle (float): velocity模式下最大转角（度）。
@@ -230,6 +267,7 @@ class HunterAgent(BaseAgent):
             agent_id=agent_id,
             role="hunter",
             max_speed=max_speed,
+            safe_dis=safe_dis,
             control_mode=control_mode,
             max_acc=max_acc,
             max_turn_angle=max_turn_angle,
@@ -244,6 +282,7 @@ class ExplorerAgent(BaseAgent):
         self,
         agent_id: int,
         max_speed: float,
+        safe_dis: float,
         control_mode: str = "velocity",
         max_acc: float = 0.0,
         max_turn_angle: float = 180.0,
@@ -257,6 +296,7 @@ class ExplorerAgent(BaseAgent):
         输入:
             agent_id (int): Explorer编号。
             max_speed (float): 最大速度（米/秒）。
+            safe_dis (float): 安全距离阈值（米）。
             control_mode (str): 控制模式（velocity/acceleration）。
             max_acc (float): acceleration模式下最大加速度（米/秒²）。
             max_turn_angle (float): velocity模式下最大转角（度）。
@@ -270,6 +310,7 @@ class ExplorerAgent(BaseAgent):
             agent_id=agent_id,
             role="explorer",
             max_speed=max_speed,
+            safe_dis=safe_dis,
             control_mode=control_mode,
             max_acc=max_acc,
             max_turn_angle=max_turn_angle,
@@ -284,6 +325,7 @@ class TargetAgent(BaseAgent):
         self,
         agent_id: int,
         max_speed: float,
+        safe_dis: float,
         control_mode: str = "velocity",
         max_acc: float = 0.0,
         max_turn_angle: float = 180.0,
@@ -301,6 +343,7 @@ class TargetAgent(BaseAgent):
         输入:
             agent_id (int): Target编号。
             max_speed (float): 最大速度（米/秒）。
+            safe_dis (float): 安全距离阈值（米）。
             control_mode (str): 控制模式（velocity/acceleration）。
             max_acc (float): acceleration模式下最大加速度（米/秒²）。
             max_turn_angle (float): velocity模式下最大转角（度）。
@@ -318,6 +361,7 @@ class TargetAgent(BaseAgent):
             agent_id=agent_id,
             role="target",
             max_speed=max_speed,
+            safe_dis=safe_dis,
             control_mode=control_mode,
             max_acc=max_acc,
             max_turn_angle=max_turn_angle,
@@ -443,16 +487,20 @@ class UAVPursuitEnv(object):
         self.noisy_target_pos_std = float(env_cfg.noisy_target_pos_std)
         self.noisy_target_vel_std = float(env_cfg.noisy_target_vel_std)
         self.target_policy_source = str(env_cfg.target_policy_source).lower()
-        self.target_switch_interval = int(
-            getattr(env_cfg, "target_switch_interval", getattr(env_cfg, "target_patrol_switch_interval", 1))
-        )
+        self.target_switch_interval = int(env_cfg.target_switch_interval)
 
         self.hunter_perception_radius = float(hunter_cfg.perception_radius)
         self.target_perception_radius = float(target_cfg.perception_radius)
         self.collision_penalty_k = float(reward_cfg.collision_penalty_k)
+        self.safe_zone_penalty_scale = float(reward_cfg.safe_zone_penalty_scale)
+        self.collision_penalty_cap = float(reward_cfg.collision_penalty_cap)
         self.speed_penalty = float(reward_cfg.speed_penalty)
-        self.hunter_capture_reward = float(getattr(reward_cfg, "hunter_capture_reward", 10.0))
-        self.target_captured_penalty = float(getattr(reward_cfg, "target_captured_penalty", 12.0))
+        self.base_far_scale = float(reward_cfg.base_far_scale)
+        self.base_near_scale = float(reward_cfg.base_near_scale)
+        self.base_streak_scale = float(reward_cfg.base_streak_scale)
+        self.base_streak_cap = int(reward_cfg.base_streak_cap)
+        self.hunter_capture_reward = float(reward_cfg.hunter_capture_reward)
+        self.target_captured_penalty = float(reward_cfg.target_captured_penalty)
 
         # 步骤3：初始化运行时状态缓存
         self.rng = np.random.RandomState()
@@ -478,10 +526,11 @@ class UAVPursuitEnv(object):
             HunterAgent(
                 i,
                 max_speed=float(hunter_cfg.max_velo),
-                control_mode=str(getattr(hunter_cfg, "control_mode", "velocity")).lower(),
-                max_acc=float(getattr(hunter_cfg, "max_acc", 0.0)),
-                max_turn_angle=float(getattr(hunter_cfg, "max_turn_angle", 180.0)),
-                min_turn_limit_velo=float(getattr(hunter_cfg, "min_turn_limit_velo", 0.0)),
+                safe_dis=float(max(self.collision_dis, float(hunter_cfg.safe_dis))),
+                control_mode=str(hunter_cfg.control_mode).lower(),
+                max_acc=float(hunter_cfg.max_acc),
+                max_turn_angle=float(hunter_cfg.max_turn_angle),
+                min_turn_limit_velo=float(hunter_cfg.min_turn_limit_velo),
                 policy_type="learn",
             )
             for i in range(self.num_hunters)
@@ -489,10 +538,11 @@ class UAVPursuitEnv(object):
         self.target = TargetAgent(
             agent_id=self.target_index,
             max_speed=float(target_cfg.max_velo),
-            control_mode=str(getattr(target_cfg, "control_mode", "velocity")).lower(),
-            max_acc=float(getattr(target_cfg, "max_acc", 0.0)),
-            max_turn_angle=float(getattr(target_cfg, "max_turn_angle", 180.0)),
-            min_turn_limit_velo=float(getattr(target_cfg, "min_turn_limit_velo", 0.0)),
+            safe_dis=float(max(self.collision_dis, float(target_cfg.safe_dis))),
+            control_mode=str(target_cfg.control_mode).lower(),
+            max_acc=float(target_cfg.max_acc),
+            max_turn_angle=float(target_cfg.max_turn_angle),
+            min_turn_limit_velo=float(target_cfg.min_turn_limit_velo),
             policy_type=self.target_policy_source,
             action_update_interval=max(1, self.target_switch_interval),
             patrol_waypoints=patrol_routes[0] if patrol_routes else None,
@@ -622,6 +672,8 @@ class UAVPursuitEnv(object):
                 "reward_speed_penalty": float(reward_terms["speed_penalty_reward"][i]),
                 "reward_hunter_base": float(reward_terms["hunter_base_reward"][i]),
                 "reward_target_base": float(reward_terms["target_base_reward"][i]),
+                "reward_hunter_streak": float(reward_terms["hunter_streak_reward"][i]),
+                "reward_target_streak": float(reward_terms["target_streak_reward"][i]),
                 "reward_capture": float(reward_terms["capture_reward"][i]),
             }
             for i, a in enumerate(self.agents)
@@ -659,12 +711,12 @@ class UAVPursuitEnv(object):
         if title is None:
             title = (
                 f"Capture {capture_text} (step {capture_step_text}) | "
-                f"Collision {collision_text} | EnvStep {int(self.step_count)}"
+                f"Collision {collision_text} | Step {int(self.step_count)}/{int(self.max_steps)}"
             )
         else:
             title = (
                 f"{title} | Capture {capture_text} (step {capture_step_text}) | "
-                f"Collision {collision_text}"
+                f"Collision {collision_text} | Step {int(self.step_count)}/{int(self.max_steps)}"
             )
         ax.set_title(title)
 
@@ -717,6 +769,30 @@ class UAVPursuitEnv(object):
                         linestyle=":",
                         linewidth=1.0,
                         alpha=0.30 if alive else 0.15,
+                    )
+                )
+            if agent.role != "target" and float(agent.safe_dis) > 0.0:
+                ax.add_patch(
+                    plt.Circle(
+                        (float(pos[0]), float(pos[1])),
+                        float(agent.safe_dis),
+                        color="#7f7f7f",
+                        fill=True,
+                        linestyle="-.",
+                        linewidth=1.0,
+                        alpha=0.30 if alive else 0.12,
+                    )
+                )
+            if agent.role == "target":
+                ax.add_patch(
+                    plt.Circle(
+                        (float(pos[0]), float(pos[1])),
+                        float(self.capture_dis),
+                        color="#bcbd22",
+                        fill=False,
+                        linestyle="-.",
+                        linewidth=1.1,
+                        alpha=0.45 if alive else 0.2,
                     )
                 )
             ax.add_patch(
@@ -849,6 +925,8 @@ class UAVPursuitEnv(object):
             [
                 Line2D([0], [0], marker="s", color="w", markerfacecolor="#d62728", markeredgecolor="black", markersize=7, label="Target"),
                 Line2D([0], [0], color="#1f77b4", lw=1.0, linestyle=":", label="Perception Radius"),
+                Line2D([0], [0], color="#7f7f7f", lw=1.0, linestyle="-.", label="Safe Distance"),
+                Line2D([0], [0], color="#bcbd22", lw=1.1, linestyle="-.", label="Target Capture Range"),
                 Line2D([0], [0], color="black", lw=1.0, linestyle="--", label="Collision Radius"),
                 Line2D([0], [0], color="#1f77b4", lw=1.8, marker=">", markersize=6, label="Velocity Vector"),
                 Line2D([0], [0], color="#1f77b4", lw=1.0, linestyle="--", label="Turn Limit"),
@@ -956,7 +1034,8 @@ class UAVPursuitEnv(object):
     def _handle_collision(self):
         """
         功能:
-            扫描碰撞对并计算碰撞奖励分量，同时标记失活agent。
+            扫描agent间距离并计算安全距离惩罚/硬碰撞结果，同时标记失活agent。
+            规则: Target不参与任何碰撞判定（不会与其他agent碰撞）。
         输入:
             无。
         输出:
@@ -970,38 +1049,45 @@ class UAVPursuitEnv(object):
         disable = [False] * self.agent_num
         collision_rewards = np.zeros(self.agent_num, dtype=np.float32)
         for i in range(self.agent_num):
-            if not agents[i].alive:
+            if not agents[i].alive: # 已发生碰撞的Agent不重新处理碰撞
                 continue
+
             for j in range(i + 1, self.agent_num):
-                if not agents[j].alive:
+                if not agents[j].alive: # 已发生碰撞的Agent不重新处理碰撞
                     continue
-                rel_pos = agents[i].position - agents[j].position
-                dist = float(np.linalg.norm(rel_pos))
-                if dist > self.collision_dis:
-                    continue
-
-                collision_pairs.append((int(i), int(j)))
-                disable[i] = True
-                disable[j] = True
                 if i == self.target_index or j == self.target_index:
-                    target_collided = True
+                    continue
 
-                rel_vel = agents[i].velocity - agents[j].velocity
-                if float(np.dot(rel_vel, rel_pos)) < 0.0:
-                    collision_rewards[i] -= self.collision_penalty_k * float(np.linalg.norm(agents[i].velocity))
-                    collision_rewards[j] -= self.collision_penalty_k * float(np.linalg.norm(agents[j].velocity))
-                else:
-                    vi = float(np.linalg.norm(agents[i].velocity))
-                    vj = float(np.linalg.norm(agents[j].velocity))
-                    if vi >= vj:
-                        collision_rewards[i] -= self.collision_penalty_k * vi
-                    else:
-                        collision_rewards[j] -= self.collision_penalty_k * vj
+                dist = float(np.linalg.norm(agents[i].position - agents[j].position))
+
+                # Step 1: 距离进入safe_dis即开始风险惩罚，越接近collision_dis惩罚越大
+                collision_rewards[i] -= _safe_distance_penalty(
+                    dist=dist,
+                    safe_dis=float(agents[i].safe_dis),
+                    collision_dis=float(self.collision_dis),
+                    collision_penalty_k=float(self.collision_penalty_k),
+                    safe_zone_penalty_scale=float(self.safe_zone_penalty_scale),
+                )
+                collision_rewards[j] -= _safe_distance_penalty(
+                    dist=dist,
+                    safe_dis=float(agents[j].safe_dis),
+                    collision_dis=float(self.collision_dis),
+                    collision_penalty_k=float(self.collision_penalty_k),
+                    safe_zone_penalty_scale=float(self.safe_zone_penalty_scale),
+                )
+
+                # Step 2: 小于collision_dis直接触发硬碰撞
+                if dist <= self.collision_dis:
+                    collision_pairs.append((int(i), int(j)))
+                    disable[i] = True
+                    disable[j] = True
 
         for idx, d in enumerate(disable):
             if d:
                 agents[idx].alive = False
                 agents[idx].velocity[:] = 0.0
+        if self.collision_penalty_cap > 0:
+            collision_rewards = np.maximum(collision_rewards, -float(self.collision_penalty_cap))
         self.last_collision_pairs = collision_pairs
         return target_collided, collision_rewards
 
@@ -1017,32 +1103,71 @@ class UAVPursuitEnv(object):
                 - np.ndarray: 总奖励，shape=(agent_num,)。
                 - dict[str, np.ndarray]: 奖励子项字典。
         """
-        # Step 1: 计算基础奖励与捕获奖励
+        # Step 1: 计算基础奖励与捕获奖励（Hunter/Target共用一组系数）
         hunter_base_reward = np.zeros(self.agent_num, dtype=np.float32)
         target_base_reward = np.zeros(self.agent_num, dtype=np.float32)
+        hunter_streak_reward = np.zeros(self.agent_num, dtype=np.float32)
+        target_streak_reward = np.zeros(self.agent_num, dtype=np.float32)
         capture_reward = np.zeros(self.agent_num, dtype=np.float32)
 
+        dist_scale = max(float(self.world_size), 1e-6)
+        capture_dis_safe = max(float(self.capture_dis), 1e-6)
+        streak_cap = max(1, int(self.base_streak_cap))
         hunter_d = []
+        streak_used = []
+
+        # 1. Base Reward计算： 主要目的是要求Hunter尽可能接近Target的捕捉半径范围内
+        ## Hunter越接近Target(d <= capture_dis)，near_ratio越接近1, reward越大
+        ## Hunter越远离Target(d >  capture_dis), far_ratio越接近1（用world_size进行归一化）
+        ## Target的reward与Hunter完全相反
+
+        # 2. streak reward: 要求hunter尽可能长期处于Target捕捉半径内
         for i, h in enumerate(self.hunters):
             d = float(np.linalg.norm(h.position - self.target.position))
             hunter_d.append(d)
-            hunter_base_reward[i] = -d
+
+            if d <= capture_dis_safe:
+                near_ratio = 1.0 - d / capture_dis_safe
+                hunter_base_reward[i] = self.base_near_scale * near_ratio
+            else:
+                far_ratio = (d - capture_dis_safe) / dist_scale
+                hunter_base_reward[i] = -self.base_far_scale * far_ratio
+
+            streak_i = int(min(int(self.capture_counter[i]), streak_cap))
+            streak_used.append(streak_i)
+            hunter_streak_reward[i] = self.base_streak_scale * float(streak_i)
+
             if captured:
                 capture_reward[i] = self.hunter_capture_reward
+
         min_d = min(hunter_d) if hunter_d else (2.0 * self.world_size)
-        target_base_reward[self.target_index] = min_d
+        if min_d <= capture_dis_safe:
+            near_ratio_t = 1.0 - min_d / capture_dis_safe
+            target_base_reward[self.target_index] = -self.base_near_scale * near_ratio_t
+        else:
+            far_ratio_t = (min_d - capture_dis_safe) / dist_scale
+            target_base_reward[self.target_index] = self.base_far_scale * far_ratio_t
+
+        avg_streak = float(np.mean(streak_used)) if streak_used else 0.0
+        target_streak_reward[self.target_index] = -self.base_streak_scale * avg_streak
+
         if captured:
             capture_reward[self.target_index] = -self.target_captured_penalty
 
-        # Step 2: 计算速度惩罚分量:  所有Agent都要避免做无畏的高速运动   （考虑Hunter再增加step惩罚？）
-        speed_penalty_reward = -self.speed_penalty * np.array(
-            [agent.speed for agent in self.agents], dtype=np.float32
-        )
+        # Step 2: 归一化速度线性惩罚，避免数值爆炸
+        speed_penalty_vals = []
+        for a in self.agents:
+            vmax = max(float(a.max_speed), 1e-6)
+            speed_norm = float(np.linalg.norm(a.velocity)) / vmax
+            speed_penalty_vals.append(speed_norm)
+        speed_penalty_reward = -self.speed_penalty * np.asarray(speed_penalty_vals, dtype=np.float32)
 
         # Step 3: 聚合总奖励与子项
         total = (
             hunter_base_reward
             + target_base_reward
+            + hunter_streak_reward
+            + target_streak_reward
             + capture_reward
             + collision_rewards
             + speed_penalty_reward
@@ -1051,6 +1176,8 @@ class UAVPursuitEnv(object):
             "total": total,
             "hunter_base_reward": hunter_base_reward.astype(np.float32),
             "target_base_reward": target_base_reward.astype(np.float32),
+            "hunter_streak_reward": hunter_streak_reward.astype(np.float32),
+            "target_streak_reward": target_streak_reward.astype(np.float32),
             "capture_reward": capture_reward.astype(np.float32),
             "collision_reward": collision_rewards.astype(np.float32),
             "speed_penalty_reward": speed_penalty_reward.astype(np.float32),
@@ -1067,14 +1194,24 @@ class UAVPursuitEnv(object):
             np.ndarray: shape=(agent_num,)。
         """
         r = np.zeros(self.agent_num, dtype=np.float32)
+        dist_scale = max(float(self.world_size), 1e-6)
+        capture_dis_safe = max(float(self.capture_dis), 1e-6)
         hunter_d = []
         for i, h in enumerate(self.hunters):
             d = float(np.linalg.norm(h.position - self.target.position))
             hunter_d.append(d)
-            r[i] += -d + (self.hunter_capture_reward if captured else 0.0)    # 距离越小，惩罚越小  -- > Hunter: 缩小与Target的距离
+            if d <= capture_dis_safe:
+                r[i] += self.base_near_scale * (1.0 - d / capture_dis_safe)
+            else:
+                r[i] += -self.base_far_scale * ((d - capture_dis_safe) / dist_scale)
+            r[i] += self.hunter_capture_reward if captured else 0.0
 
         min_d = min(hunter_d) if hunter_d else (2.0 * self.world_size)
-        r[self.target_index] += min_d - (self.target_captured_penalty if captured else 0.0)  # Target: 增加与其他Hunter的最小距离
+        if min_d <= capture_dis_safe:
+            r[self.target_index] += -self.base_near_scale * (1.0 - min_d / capture_dis_safe)
+        else:
+            r[self.target_index] += self.base_far_scale * ((min_d - capture_dis_safe) / dist_scale)
+        r[self.target_index] += -(self.target_captured_penalty if captured else 0.0)
         return r
 
     def _build_obs(self, team_sees_target):

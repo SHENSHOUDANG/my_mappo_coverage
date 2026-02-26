@@ -14,6 +14,7 @@ from pathlib import Path
 from itertools import chain
 import argparse
 import csv
+import shutil
 
 import numpy as np
 import torch
@@ -82,8 +83,8 @@ class RoleBasedRunner(object):
         # Step 3: 创建日志/模型目录
         self.log_dir = str(self.run_dir / "logs")
         self.save_dir = str(self.run_dir / "models")
-        self.gif_dir = str(self.run_dir / "eval_gifs")
-        self.best_dir = str(self.run_dir / "best_models")
+        self.gif_dir = str(self.run_dir / "gifs")
+        self.best_dir = str(self.save_dir)
         os.makedirs(self.log_dir, exist_ok=True)
         os.makedirs(self.save_dir, exist_ok=True)
         os.makedirs(self.gif_dir, exist_ok=True)
@@ -93,7 +94,10 @@ class RoleBasedRunner(object):
         self.log_csv_path = str(self.run_dir / "log.csv")
         self.eval_csv_path = str(self.run_dir / "eval.csv")
         self._init_csv_files()
-        self.best_metrics = {
+        self.gif_start_step = int(getattr(self.cfg.render, "gif_start_step", max(0, self.episode_length // 2)))
+        # 训练阶段默认仅绘制第0个rollout环境，降低开销；评估仍绘制全部eval环境。
+        self.train_gif_env_ids = [0]
+        self.best_eval_metrics = {
             "reward": -np.inf,
             "capture_rate": -np.inf,
             "capture_steps": np.inf,
@@ -250,6 +254,27 @@ class RoleBasedRunner(object):
         # Step 2: 计算总训练episode并开始计时
         start = time.time()
         episodes = int(self.num_env_steps) // self.episode_length // self.n_rollout_threads
+        print(
+            "[TrainStart] env={}, algo={}, exp={}, episodes={}, episode_len={}, rollout_threads={}, total_steps={}".format(
+                self.env_name,
+                self.algorithm_name,
+                self.experiment_name,
+                int(episodes),
+                int(self.episode_length),
+                int(self.n_rollout_threads),
+                int(self.num_env_steps),
+            )
+        )
+        print(
+            "[TrainStart] eval={}, eval_interval={}, save_interval={}, log_interval={}, log_csv={}, eval_csv={}".format(
+                bool(self.use_eval),
+                int(self.eval_interval),
+                int(self.save_interval),
+                int(self.log_interval),
+                self.log_csv_path,
+                self.eval_csv_path,
+            )
+        )
 
         # Step 3: episode主循环
         for episode in range(episodes):
@@ -258,6 +283,10 @@ class RoleBasedRunner(object):
                     self.role_trainers[role_name].policy.lr_decay(episode, episodes)
 
             do_eval_this_episode = self.use_eval and episode % max(1, self.eval_interval) == 0
+            if do_eval_this_episode:
+                print("[Train] episode {} trigger eval + gif saving".format(int(episode)))
+            if hasattr(self.envs, "capture_terminal_frame"):
+                self.envs.capture_terminal_frame = bool(do_eval_this_episode)
             train_frames = [[] for _ in range(self.n_rollout_threads)]
             train_gif_finished = np.zeros(self.n_rollout_threads, dtype=bool)
             episode_hunter_reward = 0.0
@@ -272,7 +301,7 @@ class RoleBasedRunner(object):
                     if isinstance(frame_batch, np.ndarray):
                         max_envs = min(self.n_rollout_threads, frame_batch.shape[0])
                         for env_i in range(max_envs):
-                            if not train_gif_finished[env_i]:
+                            if env_i in self.train_gif_env_ids and not train_gif_finished[env_i]:
                                 train_frames[env_i].append(frame_batch[env_i].copy())
 
                 # Sample actions
@@ -294,6 +323,9 @@ class RoleBasedRunner(object):
                 if do_eval_this_episode:
                     for env_i in range(self.n_rollout_threads):
                         if not train_gif_finished[env_i] and bool(np.all(dones[env_i])):
+                            terminal_frame = self._extract_terminal_frame(infos[env_i])
+                            if terminal_frame is not None and env_i in self.train_gif_env_ids:
+                                train_frames[env_i].append(terminal_frame.copy())
                             train_gif_finished[env_i] = True
 
                 data = (
@@ -331,10 +363,15 @@ class RoleBasedRunner(object):
             # save model
             if episode % self.save_interval == 0 or episode == episodes - 1:
                 self.save()
+                print("[Checkpoint] episode {} model saved to {}".format(int(episode), self.save_dir))
 
             # log information
             if episode % self.log_interval == 0:
                 end = time.time()
+                elapsed = float(end - start)
+                fps = float(total_num_steps / (elapsed + 1e-6))
+                progress = float((episode + 1) / max(1, episodes))
+                eta_sec = max(0.0, (self.num_env_steps - total_num_steps) / max(fps, 1e-6))
                 print(
                     "\n Env {} Algo {} Exp {} updates {}/{} episodes, total num timesteps {}/{}, FPS {}.\n".format(
                         self.env_name,
@@ -344,17 +381,37 @@ class RoleBasedRunner(object):
                         episodes,
                         total_num_steps,
                         self.num_env_steps,
-                        int(total_num_steps / (end - start + 1e-6)),
+                        int(fps),
+                    )
+                )
+                print(
+                    "[Progress] {:.1f}% | elapsed={} | eta={} | hunter_reward_mean={:.4f} | target_reward_mean={:.4f} | hunter_alive={:.4f} | target_alive={:.4f}".format(
+                        100.0 * progress,
+                        self._format_duration(elapsed),
+                        self._format_duration(eta_sec),
+                        episode_hunter_reward / max(1, self.n_rollout_threads * self.num_hunters),
+                        episode_target_reward / max(1, self.n_rollout_threads),
+                        hunter_alive_mean,
+                        target_alive_mean,
                     )
                 )
                 self.log_train(train_infos, total_num_steps)
 
             # eval + train gif
             if do_eval_this_episode:
-                for env_i in range(self.n_rollout_threads):
+                for env_i in self.train_gif_env_ids:
+                    if env_i >= self.n_rollout_threads:
+                        continue
                     train_gif_path = Path(self.gif_dir) / f"train_{int(episode)}_env_{int(env_i)}.gif"
                     self._save_gif(train_frames[env_i], train_gif_path)
+                print(
+                    "[GIF] saved train gifs for episode {} to {} ({} envs)".format(
+                        int(episode), self.gif_dir, int(len(self.train_gif_env_ids))
+                    )
+                )
                 self.eval(total_num_steps, episode)
+            if hasattr(self.envs, "capture_terminal_frame"):
+                self.envs.capture_terminal_frame = False
 
     def warmup(self):
         """
@@ -574,6 +631,9 @@ class RoleBasedRunner(object):
         eval_obs = self.eval_envs.reset()
         n_env = int(eval_obs.shape[0])
         act_dim = int(self.eval_envs.action_space[0].shape[0])
+        print("[EvalStart] episode={}, total_steps={}, eval_envs={}".format(int(episode), int(total_num_steps), n_env))
+        if hasattr(self.eval_envs, "capture_terminal_frame"):
+            self.eval_envs.capture_terminal_frame = True
 
         eval_rnn_states = {
             aid: np.zeros((n_env, self.recurrent_N, self.hidden_size), dtype=np.float32)
@@ -591,10 +651,11 @@ class RoleBasedRunner(object):
         eval_frames = [[] for _ in range(n_env)]
 
         # Step 2: 记录初始帧
-        frame_batch = self.eval_envs.render(mode="rgb_array", title=f"Eval Episode {int(episode)}")
-        if isinstance(frame_batch, np.ndarray):
-            for env_i in range(min(n_env, frame_batch.shape[0])):
-                eval_frames[env_i].append(frame_batch[env_i].copy())
+        if self.gif_start_step <= 0:
+            frame_batch = self.eval_envs.render(mode="rgb_array", title=f"Eval Episode {int(episode)}")
+            if isinstance(frame_batch, np.ndarray):
+                for env_i in range(min(n_env, frame_batch.shape[0])):
+                    eval_frames[env_i].append(frame_batch[env_i].copy())
 
         # Step 3: rollout一个评估episode长度
         for eval_step in range(self.episode_length):
@@ -627,13 +688,17 @@ class RoleBasedRunner(object):
                     env_captured[env_i] = True
                     env_capture_step[env_i] = int(eval_step + 1)
                 if bool(np.all(eval_dones[env_i])):
+                    terminal_frame = self._extract_terminal_frame(eval_infos[env_i])
+                    if terminal_frame is not None:
+                        eval_frames[env_i].append(terminal_frame.copy())
                     env_finished[env_i] = True
 
-            frame_batch = self.eval_envs.render(mode="rgb_array", title=f"Eval Episode {int(episode)}")
-            if isinstance(frame_batch, np.ndarray):
-                for env_i in range(min(n_env, frame_batch.shape[0])):
-                    if not env_finished[env_i]:
-                        eval_frames[env_i].append(frame_batch[env_i].copy())
+            if eval_step + 1 >= self.gif_start_step:
+                frame_batch = self.eval_envs.render(mode="rgb_array", title=f"Eval Episode {int(episode)}")
+                if isinstance(frame_batch, np.ndarray):
+                    for env_i in range(min(n_env, frame_batch.shape[0])):
+                        if not env_finished[env_i]:
+                            eval_frames[env_i].append(frame_batch[env_i].copy())
 
             for agent_id in self.controlled_agents:
                 done_mask = eval_dones[:, agent_id].astype(bool)
@@ -691,6 +756,9 @@ class RoleBasedRunner(object):
         for env_i in range(n_env):
             gif_path = Path(self.gif_dir) / f"e-{int(episode)}-env-{int(env_i)}.gif"
             self._save_gif(eval_frames[env_i], gif_path)
+        print("[GIF] saved eval gifs for episode {} to {} ({} envs)".format(int(episode), self.gif_dir, n_env))
+        if hasattr(self.eval_envs, "capture_terminal_frame"):
+            self.eval_envs.capture_terminal_frame = False
 
         # Step 7: 按指标保存最佳模型
         self._maybe_save_best_models(episode, eval_metrics)
@@ -710,15 +778,36 @@ class RoleBasedRunner(object):
         if frames is None or len(frames) == 0:
             return
 
-        # Step 2: 统一为3秒（10fps，共30帧）
+        # Step 2: 抽样控制帧数，并在终止帧额外停留0.8秒便于观察结束状态。
         fps = 10
-        duration_sec = 3
-        frame_count = max(1, fps * duration_sec)
-        idx = np.linspace(0, len(frames) - 1, frame_count).astype(np.int32)
-        sampled_frames = [frames[i] for i in idx]
+        max_core_frames = 30
+        if len(frames) > max_core_frames:
+            idx = np.linspace(0, len(frames) - 1, max_core_frames).astype(np.int32)
+            sampled_frames = [frames[i] for i in idx]
+        else:
+            sampled_frames = [f for f in frames]
+
+        terminal_hold_frames = 8  # 0.8s
+        sampled_frames.extend([sampled_frames[-1].copy() for _ in range(terminal_hold_frames)])
 
         # Step 3: 写出GIF
         imageio.mimsave(str(gif_path), sampled_frames, duration=1.0 / float(fps), loop=0)
+
+    def _extract_terminal_frame(self, env_infos):
+        """
+        功能:
+            从单环境infos中提取终止时刻帧（若有）。
+        输入:
+            env_infos (list[dict] | np.ndarray): 单个环境的多agent info集合。
+        输出:
+            np.ndarray | None: 终止帧RGB数组，不存在则返回None。
+        """
+        if env_infos is None:
+            return None
+        for agent_info in env_infos:
+            if isinstance(agent_info, dict) and "terminal_frame" in agent_info:
+                return agent_info["terminal_frame"]
+        return None
 
     def log_train(self, train_infos, total_num_steps):
         """
@@ -883,6 +972,25 @@ class RoleBasedRunner(object):
             return 0.0, 0.0
         return float(np.mean(hunter_alive)), float(np.mean(target_alive))
 
+    def _format_duration(self, seconds):
+        """
+        功能:
+            将秒数格式化为易读的h/m/s字符串。
+        输入:
+            seconds (float): 时长（秒）。
+        输出:
+            str: 形如\"01h23m45s\"的字符串。
+        """
+        total_sec = int(max(0.0, float(seconds)))
+        h = total_sec // 3600
+        m = (total_sec % 3600) // 60
+        s = total_sec % 60
+        if h > 0:
+            return f"{h:02d}h{m:02d}m{s:02d}s"
+        if m > 0:
+            return f"{m:02d}m{s:02d}s"
+        return f"{s:02d}s"
+
     def _maybe_save_best_models(self, episode, eval_metrics):
         """
         功能:
@@ -893,20 +1001,37 @@ class RoleBasedRunner(object):
         输出:
             无。
         """
+        updated_metrics = []
         # Step 1: reward越大越好
-        if float(eval_metrics["eval_reward"]) > float(self.best_metrics["reward"]):
-            self.best_metrics["reward"] = float(eval_metrics["eval_reward"])
+        if float(eval_metrics["eval_reward"]) > float(self.best_eval_metrics["reward"]):
+            self.best_eval_metrics["reward"] = float(eval_metrics["eval_reward"])
             self._save_best_snapshot("reward", episode, eval_metrics)
+            updated_metrics.append("reward")
 
         # Step 2: capture_rate越大越好
-        if float(eval_metrics["capture_rate"]) > float(self.best_metrics["capture_rate"]):
-            self.best_metrics["capture_rate"] = float(eval_metrics["capture_rate"])
+        if float(eval_metrics["capture_rate"]) > float(self.best_eval_metrics["capture_rate"]):
+            self.best_eval_metrics["capture_rate"] = float(eval_metrics["capture_rate"])
             self._save_best_snapshot("capture_rate", episode, eval_metrics)
+            updated_metrics.append("capture_rate")
 
         # Step 3: capture_steps越小越好
-        if float(eval_metrics["capture_steps"]) < float(self.best_metrics["capture_steps"]):
-            self.best_metrics["capture_steps"] = float(eval_metrics["capture_steps"])
+        if float(eval_metrics["capture_steps"]) < float(self.best_eval_metrics["capture_steps"]):
+            self.best_eval_metrics["capture_steps"] = float(eval_metrics["capture_steps"])
             self._save_best_snapshot("capture_steps", episode, eval_metrics)
+            updated_metrics.append("capture_steps")
+
+        print(
+            "[EvalSummary] episode={} | current: reward={:.4f}, capture_rate={:.4f}, capture_steps={:.2f} | best: reward={:.4f}, capture_rate={:.4f}, capture_steps={:.2f} | updated={}".format(
+                int(episode),
+                float(eval_metrics["eval_reward"]),
+                float(eval_metrics["capture_rate"]),
+                float(eval_metrics["capture_steps"]),
+                float(self.best_eval_metrics["reward"]),
+                float(self.best_eval_metrics["capture_rate"]),
+                float(self.best_eval_metrics["capture_steps"]),
+                ",".join(updated_metrics) if len(updated_metrics) > 0 else "none",
+            )
+        )
 
     def _save_best_snapshot(self, metric_name, episode, eval_metrics):
         """
@@ -919,8 +1044,8 @@ class RoleBasedRunner(object):
         输出:
             无。
         """
-        # Step 1: 创建指标目录
-        metric_dir = Path(self.best_dir) / str(metric_name)
+        # Step 1: 创建指标目录（run_dir/models/best_eval_{metric}）
+        metric_dir = Path(self.best_dir) / f"best_eval_{str(metric_name)}"
         metric_dir.mkdir(parents=True, exist_ok=True)
 
         # Step 2: 保存角色模型
@@ -928,7 +1053,14 @@ class RoleBasedRunner(object):
             torch.save(trainer.policy.actor.state_dict(), str(metric_dir / f"actor_{role}.pt"))
             torch.save(trainer.policy.critic.state_dict(), str(metric_dir / f"critic_{role}.pt"))
 
-        # Step 3: 写入最优指标文本
+        # Step 3: 复制本次eval的GIF到最优目录
+        for old_gif in metric_dir.glob("e-*-env-*.gif"):
+            old_gif.unlink(missing_ok=True)
+        eval_gif_paths = sorted(Path(self.gif_dir).glob(f"e-{int(episode)}-env-*.gif"))
+        for gif_path in eval_gif_paths:
+            shutil.copy2(str(gif_path), str(metric_dir / gif_path.name))
+
+        # Step 4: 写入最优指标文本
         with open(metric_dir / "best_info.txt", "w", encoding="utf-8") as f:
             f.write(f"metric={metric_name}\n")
             f.write(f"episode={int(episode)}\n")
@@ -937,3 +1069,16 @@ class RoleBasedRunner(object):
             f.write(f"capture_steps={float(eval_metrics['capture_steps']):.6f}\n")
             f.write(f"captured_episodes={int(eval_metrics.get('captured_episodes', 0))}\n")
             f.write(f"total_eval_episodes={int(eval_metrics.get('total_eval_episodes', 0))}\n")
+            f.write(f"best_reward={float(self.best_eval_metrics['reward']):.6f}\n")
+            f.write(f"best_capture_rate={float(self.best_eval_metrics['capture_rate']):.6f}\n")
+            f.write(f"best_capture_steps={float(self.best_eval_metrics['capture_steps']):.6f}\n")
+        print(
+            "[Best] metric={} updated at episode {} | reward={:.4f} | capture_rate={:.4f} | capture_steps={:.2f} | path={}".format(
+                str(metric_name),
+                int(episode),
+                float(eval_metrics["eval_reward"]),
+                float(eval_metrics["capture_rate"]),
+                float(eval_metrics["capture_steps"]),
+                str(metric_dir),
+            )
+        )

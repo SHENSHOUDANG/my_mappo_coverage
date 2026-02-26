@@ -43,13 +43,27 @@ Continuous 2D action for each agent: `Box(low=-1, high=1, shape=(2,))`.
 - Positions are updated with `dt` and clipped to world bounds.
 
 ## Rewards
-Let `d` be the distance from a pursuer to the target, and `min_distance` be the closest hunter distance to the target.
-- **Hunter**: `-d + 10` on capture, otherwise `-d`.
-- **Blocker**: `-0.7 * d + 6` on capture, otherwise `-0.7 * d`.
-- **Target**: `min_distance - 12` on capture, otherwise `min_distance`.
-- **Speed penalty**: all agents receive `-speed_penalty * speed^2` to discourage meaningless high-speed motion.
-- **Target lost penalty (blocker only)**: if the target is not visible to any pursuer, each blocker receives
-  `-(lost_target_penalty + lost_target_penalty_age_scale * last_seen_age)` to encourage active search.
+Let `d_i` be hunter `i`'s distance to target, `d_min = min_i d_i`, `R = capture_dis`.
+
+- **Shared base coefficients** (hunter/target use the same set): `base_far_scale`, `base_near_scale`, `base_streak_scale`, `base_streak_cap`.
+- **Hunter base reward**:
+  - If `d_i <= R`: `+ base_near_scale * (1 - d_i / R)` (inside capture range, closer is better).
+  - If `d_i > R`: `- base_far_scale * ((d_i - R) / world_size)` (outside capture range, farther is worse).
+- **Hunter in-range streak reward**:
+  - Reuse each hunter's capture counter (continuous steps in capture range),
+  - `+ base_streak_scale * min(capture_counter_i, base_streak_cap)`.
+- **Target base reward**:
+  - If `d_min <= R`: `- base_near_scale * (1 - d_min / R)`.
+  - If `d_min > R`: `+ base_far_scale * ((d_min - R) / world_size)`.
+- **Target streak penalty**:
+  - Based on hunters' in-range counters (mean over hunters),
+  - `- base_streak_scale * mean(min(capture_counter_i, base_streak_cap))`.
+- **Capture event reward** (single-step event):
+  - Hunters: `+ hunter_capture_reward`.
+  - Target: `- target_captured_penalty`.
+- **Speed penalty** (normalized linear form):
+  - For every agent `a`: `- k_speed * (||v_a|| / max_speed_a)`.
+  - (Backward compatibility: if `k_speed` is absent, fallback to `speed_penalty`.)
 
 ## Collision Condition
 - If any two agents are within `collision_radius`, they are marked as collided.
@@ -58,7 +72,7 @@ Let `d` be the distance from a pursuer to the target, and `min_distance` be the 
 - Collision penalties are applied once per pair:
   - If the pair is approaching (`dot(v_rel, p_rel) < 0`), both are penalized.
   - Otherwise, the faster agent is penalized.
-  - Penalty magnitude: `collision_penalty_k * speed`.
+  - Penalty magnitude: `collision_penalty_k * speed`, then clipped by `collision_penalty_cap` to avoid extreme values.
 
 ## TODO List
 - Multi-Agent Pursuit-Evasion: 

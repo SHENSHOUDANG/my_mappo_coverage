@@ -37,6 +37,7 @@ env:
 Hunter:
   perception_radius: -1
   max_velo: 20
+  safe_dis: 10
   control_mode: velocity  # Choices: ["acceleration", "velocity"]
   max_acc: 8
   max_turn_angle: 10
@@ -45,10 +46,12 @@ Hunter:
 Explorer:
   perception_radius: -1
   max_velo: 10
+  safe_dis: 10
 
 Target: 
   perception_radius: -1
   max_velo: 12
+  safe_dis: 10
   control_mode: velocity
   max_acc: 6
   max_turn_angle: 10
@@ -57,6 +60,13 @@ Target:
 # UAV pursuit scenario settings
 reward:
   collision_penalty_k: 0.0
+  safe_zone_penalty_scale: 0.2
+  collision_penalty_cap: 1000000000.0
+  base_far_scale: 0.2
+  base_near_scale: 1.0
+  base_streak_scale: 0.1
+  base_streak_cap: 30
+  k_speed: 0.02
   hunter_capture_reward: 10.0
   target_captured_penalty: 12.0
 

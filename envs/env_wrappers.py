@@ -18,6 +18,8 @@ class DummyVecEnv():
         self.share_observation_space = env.share_observation_space
         self.action_space = env.action_space
         self.actions = None
+        # 仅在需要录制GIF的阶段抓取终止帧，避免常规训练额外渲染开销。
+        self.capture_terminal_frame = False
 
     def step(self, actions):
         """
@@ -35,12 +37,20 @@ class DummyVecEnv():
         obs, rews, dones, infos = map(np.array, zip(*results))
 
         for (i, done) in enumerate(dones):
+            done_flag = False
             if 'bool' in done.__class__.__name__:
-                if done:
-                    obs[i] = self.envs[i].reset()
+                done_flag = bool(done)
             else:
-                if np.all(done):
-                    obs[i] = self.envs[i].reset()
+                done_flag = bool(np.all(done))
+
+            if done_flag:
+                if self.capture_terminal_frame:
+                    terminal_frame = self.envs[i].render(mode="rgb_array")
+                    env_infos = infos[i]
+                    for agent_info in env_infos:
+                        if isinstance(agent_info, dict):
+                            agent_info["terminal_frame"] = terminal_frame
+                obs[i] = self.envs[i].reset()
 
         self.actions = None
         return obs, rews, dones, infos
