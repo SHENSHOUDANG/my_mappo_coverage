@@ -18,7 +18,15 @@ The MAPPO in Multi-UAV Pursuit Task. 其具体环境配置可以参考文件：
 
 ## Build, Test, and Development Commands
 This project runs directly with Python and prefers YAML configs over long CLI argument lists.
-其需要借助config中的.yaml配置文件来开启一段训练
+
+开启Python环境：
+`conda activate mappo`
+
+支持CUDA训练：
+`unset LD_LIBRARY_PATH`
+
+开始训练
+`python train/train.py --config_file <config_file_path>`
 
 ## Coding Style & Naming Conventions
 Follow PEP 8 with 4‑space indentation. Use `snake_case` for functions/variables and `CamelCase` for classes. Keep imports grouped as stdlib, third‑party, then local. No enforced formatter; keep edits consistent with surrounding code and avoid large reformat‑only diffs. YAML keys should be clear `lower_snake_case`.
