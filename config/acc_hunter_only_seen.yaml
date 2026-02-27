@@ -1,6 +1,6 @@
 exp:
   algorithm_name: rmappo
-  experiment_name: acc5v1_base_Eval-h8
+  experiment_name: acc5v1_learn_rnd_Eval-h8
   seed: 1
   cuda: true
   cuda_deterministic: true
@@ -32,7 +32,7 @@ env:
 
   target_policy_source: learn # Choices: ["learn", "patrol", "Random"]
   target_patrol_path: datasets/patrol_routes.json
-  target_patrol_names: ["square", "ring"]
+  target_patrol_names: ["all"]
   target_switch_interval: 10
 
 Hunter:
@@ -125,7 +125,7 @@ schedule:
   use_linear_lr_decay: false
 
 logging:
-  log_gif: false         # 训练阶段是否按规则保存GIF
+  log_gif: true         # 训练阶段是否按规则保存GIF
 
 eval:
   fixed_tasks: []
@@ -133,8 +133,8 @@ eval:
 
 domain_randomization:
   train_split:
-    enable: false
-    regen_interval_episode: 50
+    enable: true
+    regen_interval_episode: 20
     regen_prob: 1.0
     hunter_count_choices: [1, 2, 3, 4, 5]
     seed_range: [1, 99999]

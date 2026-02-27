@@ -1,6 +1,6 @@
 exp:
   algorithm_name: rmappo
-  experiment_name: vel5v1_base_Eval-h8
+  experiment_name: vel5v1_patrol_Eval-h8
   seed: 1
   cuda: true
   cuda_deterministic: true
@@ -30,9 +30,9 @@ env:
   noisy_target_pos_std: 2  # max error percent
   noisy_target_vel_std: 10  # 
 
-  target_policy_source: learn # Choices: ["learn", "patrol", "Random"]
+  target_policy_source: patrol # Choices: ["learn", "patrol", "Random"]
   target_patrol_path: datasets/patrol_routes.json
-  target_patrol_names: ["square", "ring"]
+  target_patrol_names: ["all"]
   target_switch_interval: 10
 
 Hunter:
@@ -138,7 +138,7 @@ domain_randomization:
     regen_prob: 1.0
     hunter_count_choices: [1, 2, 3, 4, 5]
     seed_range: [1, 99999]
-    target_policy_choices: ["learn", "patrol", "random"]
+    target_policy_choices: ["patrol", "random"]
     patrol_name_choices: ["all"]
 
 # Pretrained model
