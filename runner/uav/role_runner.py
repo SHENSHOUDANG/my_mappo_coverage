@@ -105,6 +105,7 @@ class RoleBasedRunner(object):
         self.gif_start_step = int(self.cfg.render.gif_start_step)
         # 训练阶段默认仅绘制第0个rollout环境，降低开销；评估仍绘制全部eval环境。
         self.train_gif_env_ids = [0]
+
         self.pending_train_gif_once = False
         self.best_eval_metrics = {
             "reward": -np.inf,
@@ -118,6 +119,7 @@ class RoleBasedRunner(object):
                 "capture_steps": np.inf,
             }
         }
+        self.eval_hunter_bucket_metrics_cache = {}
         print(
             "[DomainRand] train.enable={}, interval={}, prob={}, hunter_choices={}, seed_range={}, target_policies={}, patrol_pool={}".format(
                 bool(self.cfg.domain_randomization.train_split.enable),
@@ -317,17 +319,16 @@ class RoleBasedRunner(object):
                     self.role_trainers[role_name].policy.lr_decay(episode, episodes)
 
             do_eval_this_episode = self.use_eval and episode % max(1, self.eval_interval) == 0
-            do_train_gif_this_episode = bool(self.pending_train_gif_once) and bool(self.log_gif)
+            do_train_gif_this_episode = bool(do_eval_this_episode and self.log_gif)
             if do_train_gif_this_episode:
-                self.pending_train_gif_once = False
-                print(
+                self._print_timed(
                     "[TrainGIF] episode {} save once (env ids: {})".format(
                         int(episode),
                         ",".join([str(int(x)) for x in self.train_gif_env_ids]),
                     )
                 )
             if do_eval_this_episode:
-                print("[Train] episode {} trigger eval (first pass without GIF)".format(int(episode)))
+                self._print_timed("[Train] episode {} trigger eval".format(int(episode)))
             if hasattr(self.envs, "capture_terminal_frame"):
                 self.envs.capture_terminal_frame = bool(do_train_gif_this_episode)
             train_frames = [[] for _ in range(self.n_rollout_threads)]
@@ -461,7 +462,7 @@ class RoleBasedRunner(object):
                         int(fps),
                     )
                 )
-                print(
+                self._print_timed(
                     "[Progress] {:.1f}% | elapsed={} | eta={} | hunter_reward_mean={:.4f} | target_reward_mean={:.4f} | hunter_alive={:.4f} | target_alive={:.4f}".format(
                         100.0 * progress,
                         self._format_duration(elapsed),
@@ -487,77 +488,36 @@ class RoleBasedRunner(object):
                         capture_step=None if train_capture_step[env_i] <= 0 else int(train_capture_step[env_i]),
                         alive_rate=float(train_alive_rate[env_i]),
                     )
-                print(
-                    "[GIF] saved one-shot train gifs for episode {} to {} ({} envs)".format(
+                self._print_timed(
+                    "[GIF] saved train gifs for episode {} to {} ({} envs)".format(
                         int(episode), self.gif_dir, int(len(self.train_gif_env_ids))
                     )
                 )
 
-            # eval（两阶段：先不渲染；仅在指标更新时重跑并保存GIF）
+            # eval（单阶段：训练期间直接评估；若log_gif=True则仅保存前3个env的GIF）
             if do_eval_this_episode:
                 fixed_metrics = self.eval(
                     total_num_steps,
                     episode,
                     eval_envs=self.eval_envs,
                     bucket="fixed",
-                    save_gifs=False,
+                    save_gifs=bool(self.log_gif),
                     record_logs=True,
+                    gif_env_limit=3,
                 )
-                fixed_updates = self._peek_fixed_metric_updates(fixed_metrics)
+                self._maybe_save_best_models(episode, fixed_metrics)
 
-                target_learn_metrics = None
-                target_learn_updates = []
                 if self.eval_envs_target_learn is not None:
                     target_learn_metrics = self.eval(
                         total_num_steps,
                         episode,
                         eval_envs=self.eval_envs_target_learn,
                         bucket="target_learn",
-                        save_gifs=False,
+                        save_gifs=bool(self.log_gif),
                         record_logs=True,
+                        gif_env_limit=3,
                     )
-                    target_learn_updates = self._peek_bucket_metric_updates("target_learn", target_learn_metrics)
-
-                should_rerun_for_gifs = (len(fixed_updates) > 0) or (len(target_learn_updates) > 0)
-                if should_rerun_for_gifs:
-                    if self.log_gif:
-                        self.pending_train_gif_once = True
-                        print(
-                            "[EvalRerun] episode {} updates detected (fixed={} | target_learn={}), rerun with GIF saving".format(
-                                int(episode),
-                                ",".join(fixed_updates) if len(fixed_updates) > 0 else "none",
-                                ",".join(target_learn_updates) if len(target_learn_updates) > 0 else "none",
-                            )
-                        )
-                        self.eval(
-                            total_num_steps,
-                            episode,
-                            eval_envs=self.eval_envs,
-                            bucket="fixed",
-                            save_gifs=True,
-                            record_logs=False,
-                        )
-                        if self.eval_envs_target_learn is not None:
-                            self.eval(
-                                total_num_steps,
-                                episode,
-                                eval_envs=self.eval_envs_target_learn,
-                                bucket="target_learn",
-                                save_gifs=True,
-                                record_logs=False,
-                            )
-                    else:
-                        print(
-                            "[EvalRerun] episode {} updates detected but logging.log_gif=false, skip training-stage GIF rerun".format(
-                                int(episode)
-                            )
-                        )
-                    if len(fixed_updates) > 0:
-                        self._maybe_save_best_models(episode, fixed_metrics)
-                    if len(target_learn_updates) > 0 and target_learn_metrics is not None:
-                        self._update_bucket_best_metrics("target_learn", target_learn_metrics)
-                else:
-                    print("[EvalRerun] episode {} no metric updates, skip GIF rerun".format(int(episode)))
+                    self._update_bucket_best_metrics("target_learn", target_learn_metrics)
             if hasattr(self.envs, "capture_terminal_frame"):
                 self.envs.capture_terminal_frame = False
 
@@ -1066,6 +1026,7 @@ class RoleBasedRunner(object):
         save_gifs=False,
         record_logs=True,
         gif_output_dir=None,
+        gif_env_limit=None,
     ):
         """
         功能:
@@ -1079,6 +1040,7 @@ class RoleBasedRunner(object):
             save_gifs (bool): 是否保存GIF。
             record_logs (bool): 是否写TB与CSV。
             gif_output_dir (str | Path | None): GIF输出目录，None时使用self.gif_dir。
+            gif_env_limit (int | None): 保存GIF的环境数量上限，None表示保存全部。
         输出:
             dict: evaluation指标字典。
         """
@@ -1091,6 +1053,7 @@ class RoleBasedRunner(object):
                 "eval_reward": 0.0,
                 "capture_rate": 0.0,
                 "capture_steps": float(self.episode_length),
+                "alive_rate": 0.0,
                 "captured_episodes": 0,
                 "total_eval_episodes": 0,
             }
@@ -1098,7 +1061,11 @@ class RoleBasedRunner(object):
         eval_obs = eval_envs.reset(mode="recover")
         n_env = int(eval_obs.shape[0])
         act_dim = int(eval_envs.action_space[0].shape[0])
-        print("[EvalStart] bucket={}, episode={}, total_steps={}, eval_envs={}".format(str(bucket), int(episode), int(total_num_steps), n_env))
+        self._print_timed(
+            "[EvalStart] bucket={}, episode={}, total_steps={}, eval_envs={}".format(
+                str(bucket), int(episode), int(total_num_steps), n_env
+            )
+        )
         if hasattr(eval_envs, "capture_terminal_frame"):
             eval_envs.capture_terminal_frame = bool(save_gifs)
 
@@ -1115,17 +1082,27 @@ class RoleBasedRunner(object):
         env_captured = np.zeros(n_env, dtype=bool)
         env_capture_step = np.full(n_env, -1, dtype=np.int32)
         env_alive_rate = np.full(n_env, 0.0, dtype=np.float32)
+        env_active_hunter_count = np.full(n_env, int(self.num_hunters), dtype=np.int32)
         env_finished = np.zeros(n_env, dtype=bool)
         eval_frames = [[] for _ in range(n_env)]
+        gif_env_ids = list(range(n_env))
+        if gif_env_limit is not None:
+            gif_env_ids = list(range(max(0, min(int(gif_env_limit), int(n_env)))))
+        gif_env_id_set = set(gif_env_ids)
 
         # Step 2: 记录初始帧
         if save_gifs:
-            frame_batch = eval_envs.render(mode="rgb_array", title=f"Eval({str(bucket)}) Episode {int(episode)}")
-            if isinstance(frame_batch, np.ndarray):
-                for env_i in range(min(n_env, frame_batch.shape[0])):
-                    eval_frames[env_i].append(frame_batch[env_i].copy())
+            for env_i in gif_env_ids:
+                frame = eval_envs.render(
+                    mode="rgb_array",
+                    env_id=int(env_i),
+                    title=f"Eval({str(bucket)}) Episode {int(episode)}",
+                )
+                if isinstance(frame, np.ndarray):
+                    eval_frames[env_i].append(frame.copy())
 
         # Step 3: rollout一个评估episode长度
+        eval_infos = [None for _ in range(n_env)]
         for eval_step in range(self.episode_length):
             eval_actions_env = np.zeros((n_env, self.num_agents, act_dim), dtype=np.float32)
 
@@ -1145,6 +1122,8 @@ class RoleBasedRunner(object):
             eval_obs, eval_rewards, eval_dones, eval_infos = eval_envs.step(eval_actions_env)
 
             for env_i in range(n_env):
+                if eval_infos[env_i] is not None and len(eval_infos[env_i]) > 0:
+                    env_active_hunter_count[env_i] = int(self._extract_active_hunter_count(eval_infos[env_i]))
                 if env_finished[env_i]:
                     continue
                 env_episode_rewards[env_i] += float(
@@ -1156,23 +1135,26 @@ class RoleBasedRunner(object):
                     env_captured[env_i] = True
                     env_capture_step[env_i] = int(eval_step + 1)
                 if bool(np.all(eval_dones[env_i])):
-                    hunter_alive_flags = [
-                        float(agent_info.get("alive", False))
-                        for agent_info in eval_infos[env_i][: self.num_hunters]
-                    ]
-                    env_alive_rate[env_i] = float(np.mean(hunter_alive_flags)) if len(hunter_alive_flags) > 0 else 0.0
-                    if save_gifs:
+                    env_alive_rate[env_i] = float(
+                        self._compute_hunter_alive_rate(eval_infos[env_i])
+                    )
+                    if save_gifs and env_i in gif_env_id_set:
                         terminal_frame = self._extract_terminal_frame(eval_infos[env_i])
                         if terminal_frame is not None:
                             eval_frames[env_i].append(terminal_frame.copy())
                     env_finished[env_i] = True
 
             if save_gifs and (eval_step + 1) % self.gif_frame_interval == 0:
-                frame_batch = eval_envs.render(mode="rgb_array", title=f"Eval({str(bucket)}) Episode {int(episode)}")
-                if isinstance(frame_batch, np.ndarray):
-                    for env_i in range(min(n_env, frame_batch.shape[0])):
-                        if not env_finished[env_i]:
-                            eval_frames[env_i].append(frame_batch[env_i].copy())
+                for env_i in gif_env_ids:
+                    if env_finished[env_i]:
+                        continue
+                    frame = eval_envs.render(
+                        mode="rgb_array",
+                        env_id=int(env_i),
+                        title=f"Eval({str(bucket)}) Episode {int(episode)}",
+                    )
+                    if isinstance(frame, np.ndarray):
+                        eval_frames[env_i].append(frame.copy())
 
             for agent_id in self.controlled_agents:
                 done_mask = eval_dones[:, agent_id].astype(bool)
@@ -1182,6 +1164,14 @@ class RoleBasedRunner(object):
 
             if bool(np.all(env_finished)):
                 break
+
+        # Step 3.1: 对未结束环境做alive_rate回填，避免日志或GIF头信息缺失。
+        for env_i in range(n_env):
+            if bool(env_finished[env_i]):
+                continue
+            if eval_infos[env_i] is None or len(eval_infos[env_i]) == 0:
+                continue
+            env_alive_rate[env_i] = float(self._compute_hunter_alive_rate(eval_infos[env_i]))
 
         # Step 4: 汇总评估指标
         total_eval_episodes = int(n_env)
@@ -1198,17 +1188,26 @@ class RoleBasedRunner(object):
             "eval_reward": eval_reward,
             "capture_rate": capture_rate,
             "capture_steps": capture_steps,
+            "alive_rate": float(np.mean(env_alive_rate)) if total_eval_episodes > 0 else 0.0,
             "captured_episodes": int(captured_episodes),
             "total_eval_episodes": int(total_eval_episodes),
         }
+        eval_metrics_by_hunters = self._build_eval_metrics_by_hunter_count(
+            env_episode_rewards=env_episode_rewards,
+            env_captured=env_captured,
+            env_capture_step=env_capture_step,
+            env_alive_rate=env_alive_rate,
+            env_active_hunter_count=env_active_hunter_count,
+        )
 
-        print(
-            "[Eval] bucket={}, episode={}, reward={:.4f}, capture_rate={:.4f}, capture_steps={:.2f}".format(
+        self._print_timed(
+            "[Eval] bucket={}, episode={}, reward={:.4f}, capture_rate={:.4f}, capture_steps={:.2f}, alive_rate={:.4f}".format(
                 str(bucket),
                 int(episode),
                 eval_reward,
                 capture_rate,
                 capture_steps,
+                float(eval_metrics["alive_rate"]),
             )
         )
 
@@ -1229,6 +1228,11 @@ class RoleBasedRunner(object):
                 {f"eval/{str(bucket)}/capture_steps": capture_steps},
                 total_num_steps,
             )
+            self.writter.add_scalars(
+                f"eval/{str(bucket)}/alive_rate",
+                {f"eval/{str(bucket)}/alive_rate": float(eval_metrics["alive_rate"])},
+                total_num_steps,
+            )
 
             self._append_eval_csv(
                 episode=episode,
@@ -1237,15 +1241,28 @@ class RoleBasedRunner(object):
                 eval_reward=eval_reward,
                 capture_rate=capture_rate,
                 capture_steps=capture_steps,
+                alive_rate=float(eval_metrics["alive_rate"]),
                 captured_episodes=captured_episodes,
                 total_eval_episodes=total_eval_episodes,
             )
+            for hunter_count, grouped_metrics in sorted(eval_metrics_by_hunters.items(), key=lambda x: int(x[0])):
+                self._append_eval_csv(
+                    episode=episode,
+                    total_num_steps=total_num_steps,
+                    bucket=f"{str(bucket)}_num_hunters_{int(hunter_count)}",
+                    eval_reward=float(grouped_metrics["eval_reward"]),
+                    capture_rate=float(grouped_metrics["capture_rate"]),
+                    capture_steps=float(grouped_metrics["capture_steps"]),
+                    alive_rate=float(grouped_metrics["alive_rate"]),
+                    captured_episodes=int(grouped_metrics["captured_episodes"]),
+                    total_eval_episodes=int(grouped_metrics["total_eval_episodes"]),
+                )
 
         # Step 6: 保存每个eval_env GIF（可选）
         if save_gifs:
             out_dir = Path(self.gif_dir) if gif_output_dir is None else Path(gif_output_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
-            for env_i in range(n_env):
+            for env_i in gif_env_ids:
                 gif_path = out_dir / f"e-{str(bucket)}-{int(episode)}-env-{int(env_i)}.gif"
                 self._save_gif(
                     eval_frames[env_i],
@@ -1254,7 +1271,21 @@ class RoleBasedRunner(object):
                     capture_step=None if env_capture_step[env_i] <= 0 else int(env_capture_step[env_i]),
                     alive_rate=float(env_alive_rate[env_i]),
                 )
-            print("[GIF] saved eval({}) gifs for episode {} to {} ({} envs)".format(str(bucket), int(episode), str(out_dir), n_env))
+            self._print_timed(
+                "[GIF] saved eval({}) gifs for episode {} to {} ({} envs)".format(
+                    str(bucket), int(episode), str(out_dir), int(len(gif_env_ids))
+                )
+            )
+        # Step 7: 始终保存“按hunter数量分桶”曲线图，不受log_gif控制。
+        out_dir = Path(self.gif_dir) if gif_output_dir is None else Path(gif_output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        self._update_eval_hunter_bucket_plot(
+            episode=episode,
+            total_num_steps=total_num_steps,
+            bucket=bucket,
+            eval_metrics_by_hunters=eval_metrics_by_hunters,
+            output_dir=out_dir,
+        )
         if hasattr(eval_envs, "capture_terminal_frame"):
             eval_envs.capture_terminal_frame = False
 
@@ -1432,6 +1463,7 @@ class RoleBasedRunner(object):
                     "eval_reward",
                     "capture_rate",
                     "capture_steps",
+                    "alive_rate",
                     "captured_episodes",
                     "total_eval_episodes",
                 ]
@@ -1483,6 +1515,7 @@ class RoleBasedRunner(object):
         eval_reward,
         capture_rate,
         capture_steps,
+        alive_rate,
         captured_episodes,
         total_eval_episodes,
     ):
@@ -1495,6 +1528,7 @@ class RoleBasedRunner(object):
             eval_reward (float): 评估平均reward。
             capture_rate (float): 捕获成功率。
             capture_steps (float): 平均捕获步数（仅成功episode）。
+            alive_rate (float): 终止时hunter平均存活率（按激活hunter归一化）。
             captured_episodes (int): 捕获成功episode数。
             total_eval_episodes (int): 评估episode总数。
         输出:
@@ -1511,6 +1545,7 @@ class RoleBasedRunner(object):
                     float(eval_reward),
                     float(capture_rate),
                     float(capture_steps),
+                    float(alive_rate),
                     int(captured_episodes),
                     int(total_eval_episodes),
                 ]
@@ -1535,16 +1570,246 @@ class RoleBasedRunner(object):
         for env_infos in infos:
             if env_infos is None or len(env_infos) == 0:
                 continue
-            hunter_flags = [
-                float(agent_info.get("alive", False))
-                for agent_info in env_infos[: self.num_hunters]
-            ]
-            hunter_alive.append(float(np.mean(hunter_flags)) if hunter_flags else 0.0)
+            hunter_alive.append(float(self._compute_hunter_alive_rate(env_infos)))
             target_alive.append(float(env_infos[self.target_index].get("alive", False)))
 
         if len(hunter_alive) == 0:
             return 0.0, 0.0
         return float(np.mean(hunter_alive)), float(np.mean(target_alive))
+
+    def _extract_active_hunter_count(self, env_infos):
+        """
+        功能:
+            统计单环境当前激活的hunter数量。
+        输入:
+            env_infos (list[dict]): 单环境多智能体info列表。
+        输出:
+            int: 激活hunter数量，最小返回1。
+        """
+        # Step 1: 空输入回退到配置最大hunter数量。
+        if env_infos is None or len(env_infos) == 0:
+            return int(max(1, self.num_hunters))
+
+        # Step 2: 优先按active_agent字段统计激活hunter数量。
+        active_count = 0
+        for hid in range(self.num_hunters):
+            if hid >= len(env_infos):
+                break
+            agent_info = env_infos[hid]
+            if not isinstance(agent_info, dict):
+                continue
+            if bool(agent_info.get("active_agent", True)):
+                active_count += 1
+        return int(max(1, active_count))
+
+    def _compute_hunter_alive_rate(self, env_infos):
+        """
+        功能:
+            计算单环境hunter存活率（分母为激活hunter数量，而非最大hunter槽位）。
+        输入:
+            env_infos (list[dict]): 单环境多智能体info列表。
+        输出:
+            float: hunter存活率，范围[0,1]。
+        """
+        # Step 1: 空输入直接返回0。
+        if env_infos is None or len(env_infos) == 0:
+            return 0.0
+
+        # Step 2: 仅统计active_agent=True的hunter，修正分母偏大问题。
+        alive_count = 0.0
+        active_count = 0.0
+        for hid in range(self.num_hunters):
+            if hid >= len(env_infos):
+                break
+            agent_info = env_infos[hid]
+            if not isinstance(agent_info, dict):
+                continue
+            if not bool(agent_info.get("active_agent", True)):
+                continue
+            active_count += 1.0
+            if bool(agent_info.get("alive", False)):
+                alive_count += 1.0
+        if active_count <= 0.0:
+            return 0.0
+        return float(alive_count / active_count)
+
+    def _build_eval_metrics_by_hunter_count(
+        self,
+        env_episode_rewards,
+        env_captured,
+        env_capture_step,
+        env_alive_rate,
+        env_active_hunter_count,
+    ):
+        """
+        功能:
+            将评估环境按hunter数量分桶，聚合各性能指标。
+        输入:
+            env_episode_rewards (np.ndarray): shape=(n_env,) 每环境reward。
+            env_captured (np.ndarray): shape=(n_env,) 每环境是否捕获成功。
+            env_capture_step (np.ndarray): shape=(n_env,) 每环境捕获步数，未捕获为-1。
+            env_alive_rate (np.ndarray): shape=(n_env,) 每环境终止alive_rate。
+            env_active_hunter_count (np.ndarray): shape=(n_env,) 每环境激活hunter数量。
+        输出:
+            dict[int, dict]: 按hunter数量索引的指标字典。
+        """
+        # Step 1: 规范化输入，准备分桶容器。
+        rewards = np.asarray(env_episode_rewards, dtype=np.float32).reshape(-1)
+        captured_flags = np.asarray(env_captured, dtype=bool).reshape(-1)
+        capture_steps = np.asarray(env_capture_step, dtype=np.int32).reshape(-1)
+        alive_rates = np.asarray(env_alive_rate, dtype=np.float32).reshape(-1)
+        hunter_counts = np.asarray(env_active_hunter_count, dtype=np.int32).reshape(-1)
+        out = {}
+
+        # Step 2: 逐hunter数量聚合reward/capture_rate/capture_steps。
+        for hunter_count in sorted([int(x) for x in np.unique(hunter_counts)]):
+            mask = hunter_counts == int(hunter_count)
+            if not bool(np.any(mask)):
+                continue
+            total_eval_episodes = int(np.sum(mask))
+            captured_episodes = int(np.sum(captured_flags[mask]))
+            grouped_capture_steps = [
+                int(x)
+                for x in capture_steps[mask]
+                if int(x) > 0
+            ]
+            mean_capture_steps = (
+                float(np.mean(grouped_capture_steps))
+                if len(grouped_capture_steps) > 0
+                else float(self.episode_length)
+            )
+            out[int(hunter_count)] = {
+                "eval_reward": float(np.mean(rewards[mask])) if total_eval_episodes > 0 else 0.0,
+                "capture_rate": float(captured_episodes / max(1, total_eval_episodes)),
+                "capture_steps": float(mean_capture_steps),
+                "alive_rate": float(np.mean(alive_rates[mask])) if total_eval_episodes > 0 else 0.0,
+                "captured_episodes": int(captured_episodes),
+                "total_eval_episodes": int(total_eval_episodes),
+            }
+        return out
+
+    def _canonical_eval_bucket_name(self, bucket):
+        """
+        功能:
+            统一评估bucket命名，便于跨桶绘图对齐。
+        输入:
+            bucket (str): 原始bucket名称。
+        输出:
+            str: 标准化bucket名称（fixed或learn等）。
+        """
+        # Step 1: learn桶兼容target_learn命名。
+        bucket_name = str(bucket).lower()
+        if bucket_name in ("target_learn", "learn"):
+            return "learn"
+        return bucket_name
+
+    def _update_eval_hunter_bucket_plot(
+        self,
+        episode,
+        total_num_steps,
+        bucket,
+        eval_metrics_by_hunters,
+        output_dir,
+    ):
+        """
+        功能:
+            更新评估分桶缓存并输出“指标-随hunter数量变化”曲线图。
+        输入:
+            episode (int): 当前episode编号。
+            total_num_steps (int): 当前累计环境步数。
+            bucket (str): 当前评估桶名称。
+            eval_metrics_by_hunters (dict[int, dict]): 当前bucket的分桶指标。
+            output_dir (Path): 图像输出目录。
+        输出:
+            无。
+        """
+        # Step 1: 构建缓存键并写入当前bucket数据。
+        out_dir = Path(output_dir)
+        cache_key = (str(out_dir.resolve()), int(episode), int(total_num_steps))
+        if cache_key not in self.eval_hunter_bucket_metrics_cache:
+            self.eval_hunter_bucket_metrics_cache[cache_key] = {}
+        canonical_bucket = self._canonical_eval_bucket_name(bucket)
+        self.eval_hunter_bucket_metrics_cache[cache_key][canonical_bucket] = dict(eval_metrics_by_hunters)
+
+        # Step 2: 基于当前可用桶（fixed/learn）绘制并覆盖保存同名图。
+        bucket_to_metrics = self.eval_hunter_bucket_metrics_cache[cache_key]
+        metrics_order = ["eval_reward", "capture_rate", "capture_steps", "alive_rate"]
+        metric_titles = {
+            "eval_reward": "Eval Reward",
+            "capture_rate": "Capture Rate",
+            "capture_steps": "Capture Steps",
+            "alive_rate": "Alive Rate",
+        }
+        bucket_style = {
+            "fixed": {"label": "fixed", "color": "#1f77b4", "marker": "o"},
+            "learn": {"label": "learn", "color": "#ff7f0e", "marker": "s"},
+        }
+
+        fig, axes = plt.subplots(4, 1, figsize=(7.5, 14.0), dpi=120)
+        for idx, metric_name in enumerate(metrics_order):
+            ax = axes[idx]
+            x_ticks = set()
+            for bucket_name in ("fixed", "learn"):
+                if bucket_name not in bucket_to_metrics:
+                    continue
+                grouped = bucket_to_metrics[bucket_name]
+                if grouped is None or len(grouped) == 0:
+                    continue
+                x_vals = sorted([int(k) for k in grouped.keys()])
+                y_vals = [float(grouped[int(hc)][metric_name]) for hc in x_vals]
+                x_ticks.update(x_vals)
+                style = bucket_style[bucket_name]
+                ax.plot(
+                    x_vals,
+                    y_vals,
+                    label=style["label"],
+                    color=style["color"],
+                    marker=style["marker"],
+                    linewidth=1.8,
+                    markersize=4.5,
+                )
+                if len(x_vals) > 0:
+                    if metric_name in ("eval_reward", "capture_rate", "alive_rate"):
+                        best_pos = int(np.argmax(np.asarray(y_vals, dtype=np.float32)))
+                    else:
+                        best_pos = int(np.argmin(np.asarray(y_vals, dtype=np.float32)))
+                    best_x = int(x_vals[best_pos])
+                    best_y = float(y_vals[best_pos])
+                    ax.scatter(
+                        [best_x],
+                        [best_y],
+                        marker="*",
+                        s=70,
+                        color=style["color"],
+                        zorder=4,
+                    )
+                    ax.annotate(
+                        f"{best_y:.3f}",
+                        xy=(best_x, best_y),
+                        xytext=(6, 6),
+                        textcoords="offset points",
+                        color=style["color"],
+                        fontsize=8,
+                    )
+            ax.set_title(metric_titles[metric_name])
+            ax.set_xlabel("Number of Hunters")
+            if len(x_ticks) > 0:
+                ax.set_xticks(sorted([int(x) for x in x_ticks]))
+            ax.grid(True, linestyle="--", linewidth=0.4, alpha=0.4)
+            if metric_name in ("capture_rate", "alive_rate"):
+                ax.set_ylim(0.0, 1.0)
+            ax.set_ylabel("Value")
+            handles, labels = ax.get_legend_handles_labels()
+            if len(handles) > 0:
+                ax.legend(loc="best")
+
+        fig.suptitle(
+            "Eval Metrics vs Hunters | episode={} | steps={}".format(int(episode), int(total_num_steps))
+        )
+        fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.97])
+        out_path = out_dir / f"eval_hunter_bucket_metrics_ep_{int(episode)}.png"
+        fig.savefig(str(out_path))
+        plt.close(fig)
 
     def _format_duration(self, seconds):
         """
@@ -1564,6 +1829,28 @@ class RoleBasedRunner(object):
         if m > 0:
             return f"{m:02d}m{s:02d}s"
         return f"{s:02d}s"
+
+    def _time_prefix(self):
+        """
+        功能:
+            生成当前本地系统时间前缀字符串。
+        输入:
+            无。
+        输出:
+            str: 形如\"[2026-02-27 20:15:30]\"的时间前缀。
+        """
+        return f"[{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}]"
+
+    def _print_timed(self, message):
+        """
+        功能:
+            以统一时间前缀打印日志，便于不同阶段耗时对齐比对。
+        输入:
+            message (str): 原始日志内容。
+        输出:
+            无。
+        """
+        print(f"{self._time_prefix()} {str(message)}")
 
     def _peek_fixed_metric_updates(self, eval_metrics):
         """
