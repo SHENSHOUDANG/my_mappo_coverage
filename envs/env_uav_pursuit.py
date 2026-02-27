@@ -336,6 +336,7 @@ class TargetAgent(BaseAgent):
         patrol_waypoints: Optional[List[np.ndarray]] = None,
         patrol_routes: Optional[List[List[np.ndarray]]] = None,
         switch_interval: int = 1,
+        control_dt: float = 1.0,
     ):
         """
         功能:
@@ -354,6 +355,7 @@ class TargetAgent(BaseAgent):
             patrol_waypoints (Optional[List[np.ndarray]]): 巡逻航点（全局坐标，米）。
             patrol_routes (Optional[List[List[np.ndarray]]]): 可选巡逻路线集合。
             switch_interval (int): 路线切换间隔（按episode计）。
+            control_dt (float): 环境控制步长dt（秒），用于patrol速度缩放。
         输出:
             无。
         """
@@ -375,6 +377,7 @@ class TargetAgent(BaseAgent):
             [self.patrol_waypoints] if len(self.patrol_waypoints) > 0 else []
         )
         self.switch_interval = max(1, int(switch_interval))
+        self.control_dt = float(max(1e-6, control_dt))
         self.route_episode_count = 0
         self.route_index = 0
         self.patrol_index = 0
@@ -439,30 +442,53 @@ class TargetAgent(BaseAgent):
     def _patrol_action(self) -> np.ndarray:
         """
         功能:
-            计算patrol模式下，指向当前航点的归一化动作。
+            计算patrol模式下动作（velocity/acceleration模式分别处理）。
         输入:
             无（内部使用self.position与self.patrol_waypoints）。
         输出:
             np.ndarray: shape=(2,), 归一化方向动作。
         """
+        # Step 1: 空路线保护
         if not self.patrol_waypoints:
             return np.zeros(2, dtype=np.float32)
+
+        # Step 2: 计算当前航点相对向量与距离
         waypoint = self.patrol_waypoints[self.patrol_index]
         vec = waypoint - self.position
         dist = float(np.linalg.norm(vec))
 
-        arrive_thre = self.max_speed * 0.2
+        # Step 3: 到达判定（acc模式放宽阈值，减轻转向与惯性导致的绕圈）
+        if self.control_mode == "acceleration":
+            arrive_thre = max(float(self.max_speed) * 1.2, float(self.safe_dis) * 0.8)
+        else:
+            arrive_thre = float(self.max_speed) * float(self.control_dt)
 
-        if dist < arrive_thre: # 到达当前航点
+        if dist <= arrive_thre:  # 到达当前航点
             self.patrol_index = (self.patrol_index + 1) % len(self.patrol_waypoints)
-            waypoint = self.patrol_waypoints[self.patrol_index] # 下一个航点
+            waypoint = self.patrol_waypoints[self.patrol_index]  # 下一个航点
             vec = waypoint - self.position
             dist = float(np.linalg.norm(vec))
+        if dist <= 1e-6:
+            return np.zeros(2, dtype=np.float32)
 
-        # if dist < arrive_thre:
-        #     return np.zeros(2, dtype=np.float32)
-        
-        return (vec / dist).astype(np.float32)  # 归一化朝向方向作为速度/加速度朝向
+        # Step 4: velocity模式：临近航点时按剩余距离降低动作幅值，避免越点往返
+        direction = (vec / dist).astype(np.float32)
+        if self.control_mode == "velocity":
+            step_reachable_dist = max(float(self.max_speed) * float(self.control_dt), 1e-6)
+            speed_scale = float(np.clip(dist / step_reachable_dist, 0.0, 1.0))
+            return (direction * speed_scale).astype(np.float32)
+
+        # Step 5: acceleration模式：求“逼近期望速度”的加速度方向，抵消原速度惯性
+        if self.control_mode == "acceleration":
+            desired_speed = float(np.clip(dist, 0.0, float(self.max_speed)))
+            desired_velocity = direction * desired_speed
+            acc_target = desired_velocity - self.velocity
+            if float(np.linalg.norm(acc_target)) <= 1e-6 or float(self.max_acc) <= 1e-6:
+                return np.zeros(2, dtype=np.float32)
+            return np.clip(acc_target / float(self.max_acc), -1.0, 1.0).astype(np.float32)
+
+        # Step 6: 其他模式回退为单位方向
+        return direction
 
 
 class UAVPursuitEnv(object):
@@ -522,6 +548,7 @@ class UAVPursuitEnv(object):
         self.base_streak_cap = int(reward_cfg.base_streak_cap)
         self.hunter_capture_reward = float(reward_cfg.hunter_capture_reward)
         self.target_captured_penalty = float(reward_cfg.target_captured_penalty)
+        self.target_collision_penalty = float(reward_cfg.target_collision_penalty)
 
         # 步骤3：初始化运行时状态缓存
         self.rng = np.random.RandomState()
@@ -547,6 +574,7 @@ class UAVPursuitEnv(object):
         self.last_capture_step = None
         self.last_target_collided = False
         self.last_collision_pairs = []
+        self.last_boundary_collision_agents = []
         self.hunter_reward_sum = 0.0
         self.target_reward_sum = 0.0
         self.reward_step_count = 0
@@ -584,6 +612,7 @@ class UAVPursuitEnv(object):
             patrol_waypoints=patrol_routes[0] if patrol_routes else None,
             patrol_routes=patrol_routes,
             switch_interval=max(1, self.target_switch_interval),
+            control_dt=float(self.dt),
         )
         self.patrol_routes = patrol_routes
         self.default_target_policy_source = str(self.target_policy_source)
@@ -707,6 +736,7 @@ class UAVPursuitEnv(object):
         self.last_capture_step = None
         self.last_target_collided = False
         self.last_collision_pairs = []
+        self.last_boundary_collision_agents = []
         self.hunter_reward_sum = 0.0
         self.target_reward_sum = 0.0
         self.reward_step_count = 0
@@ -901,10 +931,10 @@ class UAVPursuitEnv(object):
 
         # 步骤4：奖励聚合（通过统一函数返回总奖励与子项）
         rewards, reward_terms = self._compute_rewards(captured, collision_rewards)
-        active_hunter_rewards = rewards[: self.num_hunters]
-        hunter_reward_mean = (
-            float(np.mean(active_hunter_rewards)) if active_hunter_rewards.size > 0 else 0.0
-        )
+        active_hunter_rewards = [
+            float(rewards[i]) for i in range(self.num_hunters) if bool(self.active_hunter_mask[i])
+        ]
+        hunter_reward_mean = float(np.mean(active_hunter_rewards)) if len(active_hunter_rewards) > 0 else 0.0
         target_reward_value = float(rewards[self.target_index]) if self.target_index < rewards.shape[0] else 0.0
         self.hunter_reward_sum += hunter_reward_mean
         self.target_reward_sum += target_reward_value
@@ -978,17 +1008,49 @@ class UAVPursuitEnv(object):
 
         # Step 3: 标题信息（显示当前episode进度、瞬时奖励与累计奖励）
         render_title = (
-            f"{int(self.step_count)}/{int(self.max_steps)} | "
-            f"Inst Ht {float(self.hunter_reward_last):.3f} Tgt {float(self.target_reward_last):.3f} | "
-            f"Cum Ht {float(self.hunter_reward_sum):.3f} Tgt {float(self.target_reward_sum):.3f}"
+            f"Prog. {int(self.step_count)}/{int(self.max_steps)} | "
+            f"Hut rwd {float(self.hunter_reward_last):.3f} / {float(self.hunter_reward_sum):.3f} | "
+            f"Tgt rwd {float(self.target_reward_last):.3f} / {float(self.target_reward_sum):.3f}"
         )
         ax.set_title(render_title)
 
-        # Step 4: 绘制轨迹渐隐、当前位置、速度向量、感知半径和碰撞半径
+        # Step 4: 绘制Target完整巡逻轨迹（patrol模式）
+        if self.target.policy_type == "patrol" and len(self.target.patrol_waypoints) > 0:
+            patrol_points = np.asarray(self.target.patrol_waypoints, dtype=np.float32)
+            if patrol_points.ndim == 2 and patrol_points.shape[0] > 0:
+                ax.plot(
+                    patrol_points[:, 0],
+                    patrol_points[:, 1],
+                    color="#9467bd",
+                    linestyle="-",
+                    linewidth=1.4,
+                    alpha=0.65,
+                )
+                if patrol_points.shape[0] > 1:
+                    ax.plot(
+                        [float(patrol_points[-1, 0]), float(patrol_points[0, 0])],
+                        [float(patrol_points[-1, 1]), float(patrol_points[0, 1])],
+                        color="#9467bd",
+                        linestyle="-",
+                        linewidth=1.0,
+                        alpha=0.45,
+                    )
+                ax.scatter(
+                    patrol_points[:, 0],
+                    patrol_points[:, 1],
+                    c=["#9467bd"],
+                    marker="x",
+                    s=26,
+                    alpha=0.75,
+                )
+
+        # Step 5: 绘制轨迹渐隐、当前位置、速度向量、感知半径和碰撞半径
         hunter_colors = ["#1f77b4", "#2ca02c", "#ff7f0e", "#17becf", "#8c564b"]
         hunter_idx = 0
         velocity_arrow_len = max(1e-6, float(self.world_size) * 0.08)
-        for agent in self.agents:
+        for agent_idx, agent in enumerate(self.agents):
+            if agent.role == "hunter" and not bool(self.active_hunter_mask[agent_idx]):
+                continue
             if agent.role == "hunter":
                 color = hunter_colors[hunter_idx % len(hunter_colors)]
                 radius = float(self.hunter_perception_radius)
@@ -1121,7 +1183,7 @@ class UAVPursuitEnv(object):
                         alpha=0.45 if alive else 0.2,
                     )
 
-        # Step 5: 绘制Pursuit组接收到的Target位置（共享记忆）
+        # Step 6: 绘制Pursuit组接收到的Target位置（共享记忆）
         if self.shared_target_valid:
             shared_pos = np.asarray(self.shared_target_pos, dtype=np.float32)
             ax.scatter(
@@ -1148,7 +1210,7 @@ class UAVPursuitEnv(object):
                     alpha=0.25,
                 )
 
-        # Step 6: 绘制碰撞/抓捕事件提示
+        # Step 7: 绘制碰撞/抓捕事件提示
         if self.last_target_collided:
             tp = np.asarray(self.target.position, dtype=np.float32)
             ax.scatter([tp[0]], [tp[1]], c=["black"], marker="X", s=120, alpha=0.95)
@@ -1170,8 +1232,23 @@ class UAVPursuitEnv(object):
             pi = np.asarray(self.agents[i].position, dtype=np.float32)
             pj = np.asarray(self.agents[j].position, dtype=np.float32)
             ax.plot([pi[0], pj[0]], [pi[1], pj[1]], color="black", linestyle="-.", linewidth=1.0, alpha=0.5)
+        for agent_id in self.last_boundary_collision_agents:
+            if agent_id < 0 or agent_id >= self.agent_num:
+                continue
+            p = np.asarray(self.agents[agent_id].position, dtype=np.float32)
+            ax.scatter(
+                [p[0]],
+                [p[1]],
+                c=["#8c564b"],
+                marker="D",
+                s=80,
+                alpha=0.9,
+                edgecolors="black",
+                linewidths=0.6,
+            )
+            ax.text(p[0], p[1], " BND", fontsize=7, color="#8c564b")
 
-        # Step 7: 绘制图例
+        # Step 8: 绘制图例
         legend_handles = []
         for hid in range(self.num_hunters):
             if not bool(self.active_hunter_mask[hid]):
@@ -1208,9 +1285,11 @@ class UAVPursuitEnv(object):
                 Line2D([0], [0], color="black", lw=1.0, linestyle="--", label="Collision Radius"),
                 Line2D([0], [0], color="#1f77b4", lw=1.8, marker=">", markersize=6, label="Velocity Vector"),
                 Line2D([0], [0], color="#1f77b4", lw=1.0, linestyle="--", label="Turn Limit"),
+                Line2D([0], [0], color="#9467bd", lw=1.4, linestyle="-", label="Patrol Route"),
                 Line2D([0], [0], marker="*", color="w", markerfacecolor="#e377c2", markeredgecolor="black", markersize=9, label="Shared Target Pos"),
                 Line2D([0], [0], marker="*", color="w", markerfacecolor="gold", markeredgecolor="black", markersize=9, label="Capture Event"),
                 Line2D([0], [0], marker="X", color="w", markerfacecolor="black", markeredgecolor="black", markersize=8, label="Collision Event"),
+                Line2D([0], [0], marker="D", color="w", markerfacecolor="#8c564b", markeredgecolor="black", markersize=8, label="Boundary Collision"),
             ]
         )
         ax.legend(
@@ -1223,7 +1302,7 @@ class UAVPursuitEnv(object):
         )
         fig.subplots_adjust(right=0.72)
 
-        # Step 8: 返回RGB数组或直接展示
+        # Step 9: 返回RGB数组或直接展示
         if mode == "human":
             plt.show(block=False)
             plt.pause(0.001)
@@ -1325,8 +1404,11 @@ class UAVPursuitEnv(object):
     def _handle_collision(self):
         """
         功能:
-            扫描agent间距离并计算安全距离惩罚/硬碰撞结果，同时标记失活agent。
-            规则: Target不参与任何碰撞判定（不会与其他agent碰撞）。
+            扫描agent间距离与边界距离并计算风险惩罚/硬碰撞结果，同时标记失活agent。
+            规则:
+            - Target不参与与其他agent的两两碰撞判定；
+            - 所有active agent均参与边界风险与边界碰撞判定；
+            - Target边界碰撞后立即结束episode并追加较大惩罚。
         输入:
             无。
         输出:
@@ -1336,14 +1418,35 @@ class UAVPursuitEnv(object):
         """
         target_collided = False
         collision_pairs = []
+        boundary_collision_agents = []
         agents = self.agents
         disable = [False] * self.agent_num
         collision_rewards = np.zeros(self.agent_num, dtype=np.float32)
         for i in range(self.agent_num):
+            if i < self.num_hunters and (not bool(self.active_hunter_mask[i])):
+                continue
             if not agents[i].alive: # 已发生碰撞的Agent不重新处理碰撞
                 continue
 
+            # Step 1: 与边界的风险惩罚和硬碰撞判定
+            boundary_dist = self._distance_to_nearest_boundary(agents[i].position)
+            collision_rewards[i] -= _safe_distance_penalty(
+                dist=boundary_dist,
+                safe_dis=float(agents[i].safe_dis),
+                collision_dis=float(self.collision_dis),
+                collision_penalty_k=float(self.collision_penalty_k),
+                safe_zone_penalty_scale=float(self.safe_zone_penalty_scale),
+            )
+            if boundary_dist <= float(self.collision_dis):
+                disable[i] = True
+                boundary_collision_agents.append(int(i))
+                if i == self.target_index:
+                    target_collided = True
+                    collision_rewards[i] -= float(self.target_collision_penalty)
+
             for j in range(i + 1, self.agent_num):
+                if j < self.num_hunters and (not bool(self.active_hunter_mask[j])):
+                    continue
                 if not agents[j].alive: # 已发生碰撞的Agent不重新处理碰撞
                     continue
                 if i == self.target_index or j == self.target_index:
@@ -1351,7 +1454,7 @@ class UAVPursuitEnv(object):
 
                 dist = float(np.linalg.norm(agents[i].position - agents[j].position))
 
-                # Step 1: 距离进入safe_dis即开始风险惩罚，越接近collision_dis惩罚越大
+                # Step 2: 距离进入safe_dis即开始风险惩罚，越接近collision_dis惩罚越大
                 collision_rewards[i] -= _safe_distance_penalty(
                     dist=dist,
                     safe_dis=float(agents[i].safe_dis),
@@ -1367,7 +1470,7 @@ class UAVPursuitEnv(object):
                     safe_zone_penalty_scale=float(self.safe_zone_penalty_scale),
                 )
 
-                # Step 2: 小于collision_dis直接触发硬碰撞
+                # Step 3: 小于collision_dis直接触发硬碰撞
                 if dist <= self.collision_dis:
                     collision_pairs.append((int(i), int(j)))
                     disable[i] = True
@@ -1380,7 +1483,26 @@ class UAVPursuitEnv(object):
         if self.collision_penalty_cap > 0:
             collision_rewards = np.maximum(collision_rewards, -float(self.collision_penalty_cap))
         self.last_collision_pairs = collision_pairs
+        self.last_boundary_collision_agents = boundary_collision_agents
         return target_collided, collision_rewards
+
+    def _distance_to_nearest_boundary(self, position: np.ndarray) -> float:
+        """
+        功能:
+            计算位置到正方形地图最近边界的距离（米）。
+        输入:
+            position (np.ndarray): 位置向量，shape=(2,)。
+        输出:
+            float: 到最近边界的距离（非负）。
+        """
+        # Step 1: 分别计算x/y方向到边界剩余距离
+        ws = float(self.world_size)
+        pos = np.asarray(position, dtype=np.float32)
+        margin_x = ws - abs(float(pos[0]))
+        margin_y = ws - abs(float(pos[1]))
+
+        # Step 2: 返回最小非负边界距离
+        return float(max(0.0, min(margin_x, margin_y)))
 
     def _compute_rewards(self, captured, collision_rewards):
         """
