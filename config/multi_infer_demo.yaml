@@ -1,0 +1,59 @@
+exp:
+  algorithm_name: rmappo
+  experiment_name: multi_infer_demo
+  seed: 1
+  cuda: false
+
+# 复用已有角色动力学参数
+Hunter:
+  perception_radius: 40
+  max_velo: 10
+  safe_dis: 15
+  control_mode: acceleration
+  max_acc: 5
+  max_turn_angle: 10
+  min_turn_limit_velo: 3.0
+
+Target:
+  perception_radius: -1
+  max_velo: 10
+  safe_dis: 15
+  control_mode: acceleration
+  max_acc: 5
+  max_turn_angle: 20
+  min_turn_limit_velo: 3.0
+
+env:
+  target_patrol_path: datasets/patrol_routes.json
+  target_patrol_names: ["all"]
+
+multi_infer:
+  env:
+    world_size: 120
+    dt: 0.1
+    max_steps: 600
+    num_hunters: 10
+    num_explorers: 3
+    num_targets: 4
+    assignment_hunters_per_target: 2
+    capture_dis: 20
+    capture_step: 8
+    collision_dis: 3
+    neighbor_N: 3
+    target_switch_interval: 10
+    # 四类target策略概率（和为1）
+    target_policy_probs:
+      random: 0.35
+      patrol: 0.35
+      learn: 0.20
+      static: 0.10
+
+  explorer:
+    perception_radius: 35
+    route_overlap_rate: 0.2
+    max_velo: 8
+    safe_dis: 12
+    control_mode: velocity
+    max_acc: 4
+    max_turn_angle: 25
+    min_turn_limit_velo: 2.0
