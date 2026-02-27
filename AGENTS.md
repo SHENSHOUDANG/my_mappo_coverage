@@ -1,49 +1,80 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-This repository hosts `light_mappo`, a lightweight MAPPO training stack centered on a Multi‑UAV pursuit‑evasion environment. Key directories:
-- `algorithms/`: MAPPO core implementations (policy, actor‑critic, RNN/CNN/MLP helpers).
-- `config/`: Training .yaml config files.
-- `envs/`: environment wrappers and examples, including `uav_pursuit_env.py`.
-- `runner/`: training loop orchestration (shared vs separated policies).
-- `train/`: entry script `train.py`.
-- `config/`: YAML configs (including patrol routes).
-- `scripts/`: utilities (patrol route editor, MPE rendering).
-- `utils/`: shared utilities.
-- `results/`: training outputs (logs, artifacts).
+本仓库为 `light_mappo` 的 Multi-UAV Pursuit 训练实现，当前主任务是 **hunter-only** 追捕（`num_explorers` 必须为 0）。
+
+关键目录：
+- `train/`: 训练与评估入口（`train.py`, `eval.py`）。
+- `envs/`: 环境实现与向量封装（`env_uav_pursuit.py`, `env_continuous.py`, `env_wrappers.py`）。
+- `runner/uav/`: 任务专用 Runner（`role_runner.py`）。
+- `algorithms/`: MAPPO/RMAPPO 算法主体。
+- `config/`: `defaults.yaml` 与任务配置文件。
+- `agent_docs/`: 环境与任务说明文档。
+- `results/`: 训练输出（模型、日志、GIF、评估结果）。
 
 ## Multi-UAV Pursuit Task
-The MAPPO in Multi-UAV Pursuit Task. 其具体环境配置可以参考文件：
-@./agent_docs/pursuit_role.md
+任务和环境细节请以 `agent_docs/pursuit_role.md` 为准。当前实现包含：
+- 多 Hunter + 单 Target 的连续控制追逃。
+- Target 三种策略：`learn` / `random` / `patrol`。
+- 训练域随机化（`domain_randomization.train_split`）与固定评估任务（`eval.fixed_tasks(_file)`）。
 
 ## Build, Test, and Development Commands
-This project runs directly with Python and prefers YAML configs over long CLI argument lists.
+建议优先使用 YAML 配置运行。
 
-开启Python环境：
+开启 Python 环境：
 `conda activate mappo`
 
-支持CUDA训练：
+CUDA 训练前（按需）：
 `unset LD_LIBRARY_PATH`
 
-开始训练
+训练：
 `python train/train.py --config_file <config_file_path>`
 
-## Coding Style & Naming Conventions
-Follow PEP 8 with 4‑space indentation. Use `snake_case` for functions/variables and `CamelCase` for classes. Keep imports grouped as stdlib, third‑party, then local. No enforced formatter; keep edits consistent with surrounding code and avoid large reformat‑only diffs. YAML keys should be clear `lower_snake_case`.
+训练 + 性能统计：
+`python train/train.py --config_file <config_file_path> --time_stat`
 
-每个函数头都需要注释函数功能、输入输出参数名称、数据类型以及描述；函数内部需要对其大致步骤和逻辑进行说明
+离线评估：
+`python train/eval.py --config_file <config_file_path>`
+
+## Implementation Notes (train/env)
+- `train/train.py` 会先加载并深度合并 `config/defaults.yaml` 与用户 YAML。
+- 训练环境使用 `mode=initial` 自动 reset；评估环境使用固定任务并 `mode=recover` 自动 reset，保证同任务可重复比较。
+- 若 `eval.fixed_tasks_file` 存在，评估线程数会自动对齐任务数。
+- `RoleBasedRunner` 使用角色共享策略：hunter 共享一个 policy；当 `target_policy_source=learn` 时 target 也参与训练。
+
+## Coding Style & Naming Conventions
+- 遵循 PEP 8，4 空格缩进。
+- 函数/变量用 `snake_case`，类名用 `CamelCase`。
+- import 顺序：stdlib -> third-party -> local。
+- 避免无关的大规模格式化改动。
+- YAML key 使用 `lower_snake_case`。
+
+注释要求：
+- 每个函数头需写明功能、输入/输出参数（名称、类型、含义）。
+- 函数内部关键步骤建议用简洁注释说明逻辑。
 
 ## Testing Guidelines
-There is no dedicated unit test suite. 
+当前无独立单元测试框架。提交前至少应完成：
+- 用目标 YAML 成功启动训练（或评估）。
+- 核对 `results/.../run*/` 下日志与模型文件是否按预期生成。
 
 ## Commit & Pull Request Guidelines
-Commit messages should be short, imperative, and under ~60 characters (e.g., “Update config”). Pull requests should include:
-- A concise summary of changes.
-- Configs and CLI args used.
-- Any artifacts (log snippets, GIFs in `results/`).
-- Linked issues and notes on breaking changes or new dependencies.
+- Commit message 简短祈使句，建议 < 60 字符。
+- PR 需包含：
+  - 修改摘要。
+  - 使用的配置文件与命令。
+  - 关键结果（日志片段、CSV、GIF 路径）。
+  - 兼容性影响（如有）。
 
 ## Configuration & Outputs
-Prefer `--config` YAML files for reproducibility. Outputs are written to:
-`results/<env>/<scenario>/<algorithm>/<experiment_name>/run*/`.
-Keep large generated files out of PRs unless explicitly requested.
+推荐仅通过 `--config_file` 管理实验参数。
+
+输出路径（由 `train/train.py` 构造）：
+`results/<env_name>/<algorithm_name>/<experiment_name>/run*/`
+
+`run*` 下主要内容：
+- `models/`: 常规模型与 `best_eval_*` 最优快照。
+- `logs/`: TensorBoard 事件与 `summary.json`。
+- `gifs/`: 训练/评估过程可视化 GIF。
+- `log.csv`, `eval.csv`: 训练与评估结构化指标。
+- `time_stat.csv`: `--time_stat` 开启时的耗时统计。
