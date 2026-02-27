@@ -19,6 +19,7 @@ import matplotlib
 if os.environ.get("DISPLAY", "") == "" and os.environ.get("MPLBACKEND") is None:
     matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 
 from envs.env_uav_pursuit import HunterAgent, ExplorerAgent, TargetAgent
 
@@ -761,20 +762,24 @@ class MultiUAVInferenceEnv(object):
             )
         )
 
-        # 探索者搜索航线（浅色）
+        # 每个Explorer对应的搜索航线（按eid配色）
+        explorer_route_colors = ["#9ecae1", "#c7e9c0", "#fdd0a2", "#d4b9da", "#fdae6b", "#a1d99b"]
         for eid, path in enumerate(self.explorer_paths):
             if len(path) <= 1:
                 continue
             pts = np.asarray(path, dtype=np.float32)
-            ax.plot(pts[:, 0], pts[:, 1], color="#9ecae1", linewidth=0.8, alpha=0.45)
+            route_color = explorer_route_colors[eid % len(explorer_route_colors)]
+            ax.plot(pts[:, 0], pts[:, 1], color=route_color, linewidth=1.0, alpha=0.5)
 
         # hunters
         hunter_colors = ["#1f77b4", "#2ca02c", "#ff7f0e", "#17becf", "#8c564b", "#bcbd22"]
         for hid, h in enumerate(self.hunters):
             color = hunter_colors[hid % len(hunter_colors)]
-            alpha = 1.0 if h.alive else 0.25
+            assigned = int(self.hunter_assignment[hid]) >= 0
+            alpha = 1.0 if (h.alive and assigned) else (0.35 if h.alive else 0.2)
             ax.scatter([h.position[0]], [h.position[1]], c=[color], s=50, marker="o", alpha=alpha, edgecolors="black", linewidths=0.4)
-            ax.text(float(h.position[0]), float(h.position[1]), f"H{hid}", fontsize=7, color=color, alpha=alpha)
+            label = f"H{hid}" if assigned else f"H{hid}(idle)"
+            ax.text(float(h.position[0]), float(h.position[1]), label, fontsize=7, color=color, alpha=alpha)
 
             tid = int(self.hunter_assignment[hid])
             if tid >= 0 and tid < self.num_targets and bool(self.target_alive[tid]):
@@ -792,7 +797,7 @@ class MultiUAVInferenceEnv(object):
         for eid, e in enumerate(self.explorers):
             mode_txt = str(self.explorer_state[eid])
             color = "#9467bd" if mode_txt == "SEARCH" else "#e377c2"
-            alpha = 1.0 if e.alive else 0.3
+            alpha = 0.45 if (e.alive and mode_txt == "SEARCH") else (1.0 if e.alive else 0.25)
             ax.scatter([e.position[0]], [e.position[1]], c=[color], s=65, marker="^", alpha=alpha, edgecolors="black", linewidths=0.5)
             ax.add_patch(
                 plt.Circle(
@@ -805,7 +810,7 @@ class MultiUAVInferenceEnv(object):
                     alpha=0.2,
                 )
             )
-            ax.text(float(e.position[0]), float(e.position[1]), f"E{eid}:{mode_txt[0]}", fontsize=7, color=color, alpha=alpha)
+            ax.text(float(e.position[0]), float(e.position[1]), f"E{eid}:{mode_txt}", fontsize=7, color=color, alpha=alpha)
 
             tid = int(self.explorer_track_target[eid])
             if tid >= 0 and tid < self.num_targets and bool(self.target_alive[tid]):
@@ -822,11 +827,24 @@ class MultiUAVInferenceEnv(object):
         # targets
         for tid, t in enumerate(self.targets):
             alive = bool(self.target_alive[tid]) and bool(t.alive)
+            discovered = bool(self.target_discovered[tid])
             color = "#d62728" if alive else "#7f7f7f"
-            alpha = 1.0 if alive else 0.35
+            # 未被发现半透明，被发现不透明；死亡时低透明。
+            alpha = 1.0 if (alive and discovered) else (0.45 if alive else 0.3)
             marker = "s" if alive else "X"
             ax.scatter([t.position[0]], [t.position[1]], c=[color], s=70, marker=marker, alpha=alpha, edgecolors="black", linewidths=0.5)
-            ax.text(float(t.position[0]), float(t.position[1]), f"T{tid}:{str(t.policy_type)[:2]}", fontsize=7, color=color, alpha=alpha)
+            if alive:
+                status = "FOUND" if discovered else "HIDDEN"
+            else:
+                status = "DEAD"
+            ax.text(
+                float(t.position[0]),
+                float(t.position[1]),
+                f"T{tid}:{str(t.policy_type)[:2]}:{status}",
+                fontsize=7,
+                color=color,
+                alpha=alpha,
+            )
 
             if alive:
                 ax.add_patch(
@@ -836,8 +854,8 @@ class MultiUAVInferenceEnv(object):
                         color="#d62728",
                         fill=False,
                         linestyle="--",
-                        linewidth=0.8,
-                        alpha=0.2,
+                        linewidth=0.9,
+                        alpha=0.5 if discovered else 0.18,
                     )
                 )
 
@@ -848,6 +866,20 @@ class MultiUAVInferenceEnv(object):
             p = np.asarray(info["pos"], dtype=np.float32)
             ax.scatter([p[0]], [p[1]], c=["#e377c2"], marker="*", s=130, alpha=0.9, edgecolors="black", linewidths=0.4)
             ax.text(float(p[0]), float(p[1]), f"S{tid}", fontsize=7, color="#e377c2")
+
+        legend_handles = [
+            Line2D([0], [0], marker="s", color="w", markerfacecolor="#d62728", markeredgecolor="black", markersize=8, label="Target (found, alive)"),
+            Line2D([0], [0], marker="s", color="w", markerfacecolor="#d62728", markeredgecolor="black", alpha=0.45, markersize=8, label="Target (hidden, alive)"),
+            Line2D([0], [0], marker="X", color="w", markerfacecolor="#7f7f7f", markeredgecolor="black", markersize=8, label="Target dead"),
+            Line2D([0], [0], color="#d62728", linestyle="--", linewidth=1.0, label="Capture radius"),
+            Line2D([0], [0], marker="o", color="w", markerfacecolor="#1f77b4", markeredgecolor="black", markersize=7, label="Hunter assigned"),
+            Line2D([0], [0], marker="o", color="w", markerfacecolor="#1f77b4", markeredgecolor="black", alpha=0.35, markersize=7, label="Hunter idle"),
+            Line2D([0], [0], marker="^", color="w", markerfacecolor="#9467bd", markeredgecolor="black", alpha=0.45, markersize=8, label="Explorer SEARCH"),
+            Line2D([0], [0], marker="^", color="w", markerfacecolor="#e377c2", markeredgecolor="black", markersize=8, label="Explorer TRACK"),
+            Line2D([0], [0], color="#9ecae1", linewidth=1.0, label="Explorer route segment"),
+            Line2D([0], [0], marker="*", color="w", markerfacecolor="#e377c2", markeredgecolor="black", markersize=10, label="Shared target memory"),
+        ]
+        ax.legend(handles=legend_handles, loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=7, framealpha=0.85, borderaxespad=0.0)
 
     def render(self, mode: str = "rgb_array"):
         """
@@ -865,6 +897,7 @@ class MultiUAVInferenceEnv(object):
             if self._human_fig is None or self._human_ax is None:
                 plt.ion()
                 self._human_fig, self._human_ax = plt.subplots(figsize=(7.2, 7.2), dpi=100)
+                self._human_fig.subplots_adjust(right=0.72)
             self._human_ax.clear()
             self._draw_scene(self._human_ax)
             self._human_fig.canvas.draw_idle()
@@ -873,6 +906,7 @@ class MultiUAVInferenceEnv(object):
             return None
 
         fig, ax = plt.subplots(figsize=(7.2, 7.2), dpi=100)
+        fig.subplots_adjust(right=0.72)
         self._draw_scene(ax)
         fig.canvas.draw()
         img = np.asarray(fig.canvas.buffer_rgba(), dtype=np.uint8)[..., :3].copy()

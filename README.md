@@ -117,6 +117,7 @@ python train/infer_multi.py \
   --config_file config/multi_infer_demo.yaml \
   --episodes 1 --save_gif --gif_frame_interval 20
 ```
+`--gif_duration` 可设置每帧时长，默认 `1.0` 秒。
 
 运行示例（加载训练好的 hunter actor）：
 ```bash

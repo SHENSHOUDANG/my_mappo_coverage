@@ -318,7 +318,7 @@ if __name__ == "__main__":
     parser.add_argument("--render", action="store_true", help="Show online visualization window")
     parser.add_argument("--save_gif", action="store_true", help="Save per-episode GIF")
     parser.add_argument("--gif_frame_interval", type=int, default=2, help="Frame sampling interval in env steps")
-    parser.add_argument("--gif_duration", type=float, default=0.08, help="GIF frame duration in seconds")
+    parser.add_argument("--gif_duration", type=float, default=1.0, help="GIF frame duration in seconds")
     parser.add_argument("--gif_name_prefix", type=str, default="multi_infer", help="GIF filename prefix")
     args = parser.parse_args()
     main(args)
