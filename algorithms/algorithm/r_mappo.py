@@ -58,6 +58,9 @@ class RMAPPO():
             self.value_normalizer = ValueNorm(1, device=self.device)
         else:
             self.value_normalizer = None
+        self._warned_zero_active_in_train = False
+        self._warned_all_nan_adv_in_train = False
+        self._zero_active_batch_count = 0
 
     def cal_value_loss(self, values, value_preds_batch, return_batch, active_masks_batch):
         """
@@ -124,10 +127,13 @@ class RMAPPO():
         # Step 0: 全inactive样本保护（先告警，再跳过，避免active_masks求和为0导致NaN）
         active_mask_sum = float(active_masks_batch.sum().item())
         if active_mask_sum <= 1e-8:
-            print(
-                "\n[WARNING][MAPPO] active_masks sum is zero in current mini-batch. "
-                "Skip PPO update for this batch to avoid NaN.\n"
-            )
+            self._zero_active_batch_count += 1
+            if not self._warned_zero_active_in_train:
+                print(
+                    "\n[WARNING][MAPPO] active_masks sum is zero in current mini-batch. "
+                    "Skip PPO update for this batch to avoid NaN.\n"
+                )
+                self._warned_zero_active_in_train = True
             zero_scalar = torch.zeros(1, **self.tpdv)
             imp_weights = torch.ones(1, **self.tpdv)
             return zero_scalar, 0.0, zero_scalar, zero_scalar, 0.0, imp_weights
@@ -192,6 +198,10 @@ class RMAPPO():
 
         :return train_info: (dict) contains information regarding training update (e.g. loss, grad norms, etc).
         """
+        self._warned_zero_active_in_train = False
+        self._warned_all_nan_adv_in_train = False
+        self._zero_active_batch_count = 0
+
         if self._use_popart or self._use_valuenorm:
             advantages = buffer.returns[:-1] - self.value_normalizer.denormalize(buffer.value_preds[:-1])
         else:
@@ -199,10 +209,12 @@ class RMAPPO():
         advantages_copy = advantages.copy()
         advantages_copy[buffer.active_masks[:-1] == 0.0] = np.nan
         if np.all(np.isnan(advantages_copy)):
-            print(
-                "\n[WARNING][MAPPO] all advantages are masked (active_masks==0). "
-                "Use zero-mean/unit-std fallback for normalization.\n"
-            )
+            if not self._warned_all_nan_adv_in_train:
+                print(
+                    "\n[WARNING][MAPPO] all advantages are masked (active_masks==0). "
+                    "Use zero-mean/unit-std fallback for normalization.\n"
+                )
+                self._warned_all_nan_adv_in_train = True
             mean_advantages = 0.0
             std_advantages = 1.0
         else:
@@ -244,6 +256,13 @@ class RMAPPO():
 
         for k in train_info.keys():
             train_info[k] /= num_updates
+
+        if self._zero_active_batch_count > 0:
+            print(
+                "[WARNING][MAPPO] skipped {} mini-batches due to zero active masks in this train() call.".format(
+                    int(self._zero_active_batch_count)
+                )
+            )
 
         return train_info
 
