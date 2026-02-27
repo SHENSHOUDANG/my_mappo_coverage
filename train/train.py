@@ -13,14 +13,121 @@ parent_dir = os.path.abspath(os.path.join(os.getcwd(), "."))
 sys.path.append(parent_dir)
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
 import setproctitle
 import torch
+import yaml
 
 from utils.util import load_config
 from envs.env_wrappers import DummyVecEnv
+
+
+def _load_eval_task_specs(merged_cfg):
+    """
+    构建评估线程对应的固定任务规格列表。
+
+    输入:
+        merged_cfg (EasyDict): 分层配置对象。
+    输出:
+        list[dict] | None: 长度为n_eval_rollout_threads的任务规格列表；若未配置则返回None。
+    """
+    fixed_tasks = list(merged_cfg.eval.fixed_tasks)
+    fixed_tasks_file = merged_cfg.eval.fixed_tasks_file
+    from_external_file = fixed_tasks_file is not None
+    if fixed_tasks_file is not None:
+        task_path = Path(str(fixed_tasks_file))
+        if not task_path.is_absolute():
+            root = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            task_path = root / task_path
+        if not task_path.exists():
+            raise FileNotFoundError(f"eval.fixed_tasks_file not found: {task_path}")
+        if task_path.suffix.lower() in [".yaml", ".yml"]:
+            with open(task_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        elif task_path.suffix.lower() == ".json":
+            with open(task_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        else:
+            raise ValueError(f"Unsupported eval task file format: {task_path.suffix}")
+
+        if isinstance(data, dict):
+            if "tasks" not in data:
+                raise ValueError("eval task file dict must contain key 'tasks'")
+            fixed_tasks = list(data["tasks"])
+        elif isinstance(data, list):
+            fixed_tasks = list(data)
+        else:
+            raise ValueError("eval task file must be a list or a dict with key 'tasks'")
+    if len(fixed_tasks) == 0:
+        return None, bool(from_external_file)
+
+    # 兼容策略:
+    # 1) 外部任务文件：eval线程数自动对齐为任务数；
+    # 2) 非外部任务文件：沿用配置线程数，并将fixed_tasks按线程数展开。
+    if from_external_file:
+        return [dict(x) for x in fixed_tasks], True
+
+    n_env = int(merged_cfg.exp.n_eval_rollout_threads)
+    if n_env <= 0:
+        return None, False
+    out = []
+    for i in range(n_env):
+        out.append(dict(fixed_tasks[i % len(fixed_tasks)]))
+    return out, False
+
+
+def _build_target_learn_eval_specs(eval_task_specs):
+    """
+    基于固定评估任务构建Target=learn版本任务列表。
+
+    输入:
+        eval_task_specs (list[dict]): 固定评估任务列表。
+    输出:
+        list[dict]: 将target_policy_source强制为learn后的任务列表。
+    """
+    out = []
+    for spec in eval_task_specs:
+        s = dict(spec)
+        s["target_policy_source"] = "learn"
+        out.append(s)
+    return out
+
+
+def _print_domain_randomization_settings(merged_cfg, eval_task_specs):
+    """
+    打印domain randomization配置，便于训练启动时快速确认。
+
+    输入:
+        merged_cfg (EasyDict): 分层配置对象。
+        eval_task_specs (list[dict] | None): 展开后的评估固定任务列表。
+    输出:
+        无。
+    """
+    train_split = merged_cfg.domain_randomization.train_split
+    print(
+        "[DomainRandConfig] train.enable={}, interval={}, prob={}, hunter_choices={}, seed_range={}, target_policies={}, patrol_pool={}".format(
+            bool(train_split.enable),
+            int(train_split.regen_interval_episode),
+            float(train_split.regen_prob),
+            list(train_split.hunter_count_choices),
+            list(train_split.seed_range),
+            list(train_split.target_policy_choices),
+            list(train_split.patrol_name_choices),
+        )
+    )
+    eval_source = "inline"
+    if merged_cfg.eval.fixed_tasks_file is not None:
+        eval_source = str(merged_cfg.eval.fixed_tasks_file)
+    print(
+        "[EvalConfig] fixed_task_source={}, fixed_tasks={}, dual_eval_target_learn={}".format(
+            eval_source,
+            0 if eval_task_specs is None else int(len(eval_task_specs)),
+            str(merged_cfg.env.target_policy_source).lower() == "learn",
+        )
+    )
 
 
 def make_train_env(merged_cfg):
@@ -53,15 +160,18 @@ def make_train_env(merged_cfg):
             from envs.env_continuous import ContinuousActionEnv
 
             env = ContinuousActionEnv(merged_cfg)
+            env.set_regen_scope("train")
             env.seed(int(merged_cfg.exp.seed) + rank * 1000)
             return env
 
         return init_env
 
-    return DummyVecEnv([get_env_fn(i) for i in range(int(merged_cfg.exp.n_rollout_threads))])
+    vec_env = DummyVecEnv([get_env_fn(i) for i in range(int(merged_cfg.exp.n_rollout_threads))])
+    vec_env.set_auto_reset(mode="initial")
+    return vec_env
 
 
-def make_eval_env(merged_cfg):
+def make_eval_env(merged_cfg, eval_task_specs):
     """
     创建评估环境向量封装。
 
@@ -91,14 +201,20 @@ def make_eval_env(merged_cfg):
             from envs.env_continuous import ContinuousActionEnv
 
             env = ContinuousActionEnv(merged_cfg)
-            env.seed(int(merged_cfg.exp.seed) + rank * 1000)
+            env.set_regen_scope("eval")
+            env.seed(int(merged_cfg.exp.seed) * 10 + rank * 1000)
             return env
 
         return init_env
 
-    return DummyVecEnv(
+    eval_env = DummyVecEnv(
         [get_env_fn(i) for i in range(int(merged_cfg.exp.n_eval_rollout_threads))]
     )
+    if eval_task_specs is None:
+        raise ValueError("Eval requires fixed tasks. Please set eval.fixed_tasks or eval.fixed_tasks_file.")
+    eval_env.reset_task(mode="regen", task_specs=eval_task_specs)
+    eval_env.set_auto_reset(mode="recover", task_specs=eval_task_specs)
+    return eval_env
 
 
 parser = argparse.ArgumentParser(
@@ -182,14 +298,28 @@ def main(args):
     np.random.seed(int(merged_cfg.exp.seed))
 
     # Step 5: 构建环境
+    eval_task_specs, from_external_file = _load_eval_task_specs(merged_cfg) if bool(merged_cfg.eval.use_eval) else (None, False)
+    if bool(merged_cfg.eval.use_eval) and bool(from_external_file) and eval_task_specs is not None:
+        merged_cfg.exp.n_eval_rollout_threads = int(len(eval_task_specs))
+        print(
+            "[EvalConfig] override n_eval_rollout_threads={} (from external fixed task file)".format(
+                int(merged_cfg.exp.n_eval_rollout_threads)
+            )
+        )
+    _print_domain_randomization_settings(merged_cfg, eval_task_specs)
     envs = make_train_env(merged_cfg)
-    eval_envs = make_eval_env(merged_cfg) if bool(merged_cfg.eval.use_eval) else None
+    eval_envs = make_eval_env(merged_cfg, eval_task_specs) if bool(merged_cfg.eval.use_eval) else None
+    eval_envs_target_learn = None
+    if bool(merged_cfg.eval.use_eval) and str(merged_cfg.env.target_policy_source).lower() == "learn":
+        eval_task_specs_target_learn = _build_target_learn_eval_specs(eval_task_specs)
+        eval_envs_target_learn = make_eval_env(merged_cfg, eval_task_specs_target_learn)
 
     # Step 6: 构建Runner配置
     num_agents = int(merged_cfg.env.num_hunters) + int(merged_cfg.env.num_explorers) + 1
     runner_cfg = {
         "envs": envs,
         "eval_envs": eval_envs,
+        "eval_envs_target_learn": eval_envs_target_learn,
         "device": device,
         "run_dir": run_dir,
         "num_agents": num_agents,
@@ -205,6 +335,8 @@ def main(args):
     envs.close()
     if bool(merged_cfg.eval.use_eval) and eval_envs is not envs:
         eval_envs.close()
+    if bool(merged_cfg.eval.use_eval) and eval_envs_target_learn is not None and eval_envs_target_learn is not envs:
+        eval_envs_target_learn.close()
 
     runner.writter.export_scalars_to_json(str(runner.log_dir + "/summary.json"))
     runner.writter.close()

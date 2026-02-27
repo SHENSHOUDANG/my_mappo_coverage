@@ -1,12 +1,12 @@
 exp:
   algorithm_name: rmappo
-  experiment_name: vel3v1_base_colli_speed
+  experiment_name: vel3v1_base_rnd
   seed: 1
   cuda: true
   cuda_deterministic: true
   n_training_threads: 2
   n_rollout_threads: 5
-  n_eval_rollout_threads: 20
+  n_eval_rollout_threads: 9
   n_render_rollout_threads: 1
   num_env_steps: 2000000 # total environment steps to train
 
@@ -18,6 +18,7 @@ env:
   dt: 0.1
   num_hunters: 3
   num_explorers: 0
+  neighbor_N: 3
 
   capture_dis: 20
   capture_step: 10
@@ -50,11 +51,11 @@ Explorer:
 
 Target: 
   perception_radius: -1
-  max_velo: 12
+  max_velo: 20
   safe_dis: 15
   control_mode: velocity
   max_acc: 6
-  max_turn_angle: 10
+  max_turn_angle: 20
   min_turn_limit_velo: 5.0
 
 # UAV pursuit scenario settings
@@ -122,6 +123,19 @@ ppo:
 schedule:
   use_linear_lr_decay: false
 
+eval:
+  fixed_tasks: []
+  fixed_tasks_file: config/eval_tasks/eval_enhance.yaml
+
+domain_randomization:
+  train_split:
+    enable: true
+    regen_interval_episode: 50
+    regen_prob: 1.0
+    hunter_count_choices: [1, 2, 3]
+    seed_range: [1, 99999]
+    target_policy_choices: ["learn"]
+    patrol_name_choices: ["square", "ring"]
 
 # Pretrained model
 pretrained:

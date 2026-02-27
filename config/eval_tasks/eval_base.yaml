@@ -1,0 +1,10 @@
+tasks:
+  - {num_hunters: 1, seed: 10001, target_policy_source: random, target_patrol_names: ["square"], target_route_id: 0}
+  - {num_hunters: 1, seed: 10002, target_policy_source: patrol, target_patrol_names: ["square"], target_route_id: 0}
+  - {num_hunters: 1, seed: 10003, target_policy_source: patrol, target_patrol_names: ["ring"], target_route_id: 0}
+  - {num_hunters: 2, seed: 10011, target_policy_source: random, target_patrol_names: ["ring"], target_route_id: 0}
+  - {num_hunters: 2, seed: 10012, target_policy_source: patrol, target_patrol_names: ["square"], target_route_id: 0}
+  - {num_hunters: 2, seed: 10013, target_policy_source: patrol, target_patrol_names: ["ring"], target_route_id: 0}
+  - {num_hunters: 3, seed: 10021, target_policy_source: random, target_patrol_names: ["square"], target_route_id: 0}
+  - {num_hunters: 3, seed: 10022, target_policy_source: patrol, target_patrol_names: ["square"], target_route_id: 0}
+  - {num_hunters: 3, seed: 10023, target_policy_source: patrol, target_patrol_names: ["ring"], target_route_id: 0}

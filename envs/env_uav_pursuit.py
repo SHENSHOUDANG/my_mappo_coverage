@@ -379,21 +379,33 @@ class TargetAgent(BaseAgent):
         self.route_index = 0
         self.patrol_index = 0
 
-    def reset(self, init_pos: np.ndarray):
+    def reset(
+        self,
+        init_pos: np.ndarray,
+        force_route_index: Optional[int] = None,
+        force_route_episode_count: Optional[int] = None,
+    ):
         """
         功能:
             重置Target状态并将巡逻索引归零。
         输入:
             init_pos (np.ndarray): shape=(2,), 全局坐标（米）。
+            force_route_index (Optional[int]): 强制使用的巡逻路线索引。
+            force_route_episode_count (Optional[int]): 强制设置的路线episode计数。
         输出:
             无。
         """
         super().reset(init_pos)
-        self.route_episode_count += 1
+        if force_route_episode_count is not None:
+            self.route_episode_count = int(force_route_episode_count)
+        else:
+            self.route_episode_count += 1
 
         if self.policy_type == "patrol" and len(self.patrol_routes) > 0:
             # 每次reset后episode计数+1，与switch_interval取模为0时切换到下一条路线。
-            if self.route_episode_count % self.switch_interval == 0:
+            if force_route_index is not None:
+                self.route_index = int(force_route_index) % len(self.patrol_routes)
+            elif self.route_episode_count % self.switch_interval == 0:
                 self.route_index = (self.route_index + 1) % len(self.patrol_routes)
             self.patrol_waypoints = self.patrol_routes[self.route_index]
             self.patrol_index = 0
@@ -438,14 +450,19 @@ class TargetAgent(BaseAgent):
         waypoint = self.patrol_waypoints[self.patrol_index]
         vec = waypoint - self.position
         dist = float(np.linalg.norm(vec))
-        if dist < 1e-6:
+
+        arrive_thre = self.max_speed * 0.2
+
+        if dist < arrive_thre: # 到达当前航点
             self.patrol_index = (self.patrol_index + 1) % len(self.patrol_waypoints)
-            waypoint = self.patrol_waypoints[self.patrol_index]
+            waypoint = self.patrol_waypoints[self.patrol_index] # 下一个航点
             vec = waypoint - self.position
             dist = float(np.linalg.norm(vec))
-        if dist < 1e-6:
-            return np.zeros(2, dtype=np.float32)
-        return (vec / dist).astype(np.float32)
+
+        # if dist < arrive_thre:
+        #     return np.zeros(2, dtype=np.float32)
+        
+        return (vec / dist).astype(np.float32)  # 归一化朝向方向作为速度/加速度朝向
 
 
 class UAVPursuitEnv(object):
@@ -476,7 +493,11 @@ class UAVPursuitEnv(object):
 
         self.target_index = self.num_hunters
         self.agent_num = self.num_hunters + 1
-        self.obs_dim = 4 + (self.agent_num - 1) * 5 + 5
+        self.neighbor_N = int(env_cfg.neighbor_N)
+        self.neighbor_N = max(0, self.neighbor_N)
+        self.neighbor_feat_dim = 6  # [dx,dy,dvx,dvy,d,valid]
+        self.target_feat_dim = 6    # [dx,dy,dvx,dvy,d,visible]
+        self.obs_dim = 4 + self.neighbor_N * self.neighbor_feat_dim + self.target_feat_dim + 5
         self.action_dim = 2
 
         self.capture_dis = float(env_cfg.capture_dis)
@@ -504,10 +525,19 @@ class UAVPursuitEnv(object):
 
         # 步骤3：初始化运行时状态缓存
         self.rng = np.random.RandomState()
+        self.position_rng = np.random.RandomState()
+        self.base_seed = 0
         self.step_count = 0
         self.episode_count = 0
         self.capture_counter = np.zeros(self.num_hunters, dtype=np.int32)
         self.done = np.zeros(self.agent_num, dtype=bool)
+
+        self.active_hunter_mask = np.ones(self.num_hunters, dtype=bool)
+        self.active_num_hunters = self.num_hunters
+        self.task_seed = None
+        self.regen_scope = "train"
+        self.target_route_id = 0
+        self.initial_reset_count = 0
 
         self.shared_target_pos = np.zeros(2, dtype=np.float32)
         self.shared_target_vel = np.zeros(2, dtype=np.float32)
@@ -517,6 +547,12 @@ class UAVPursuitEnv(object):
         self.last_capture_step = None
         self.last_target_collided = False
         self.last_collision_pairs = []
+        self.hunter_reward_sum = 0.0
+        self.target_reward_sum = 0.0
+        self.reward_step_count = 0
+        self.hunter_reward_last = 0.0
+        self.target_reward_last = 0.0
+        self.active_target_patrol_names = list(env_cfg.target_patrol_names)
 
         # 步骤4：初始化Agent对象
         patrol_routes = self._load_patrol_routes(
@@ -550,6 +586,11 @@ class UAVPursuitEnv(object):
             switch_interval=max(1, self.target_switch_interval),
         )
         self.patrol_routes = patrol_routes
+        self.default_target_policy_source = str(self.target_policy_source)
+        self.default_target_patrol_names = list(env_cfg.target_patrol_names)
+        self.default_target_patrol_path = str(env_cfg.target_patrol_path)
+
+        self.train_split_cfg = config.domain_randomization.train_split
 
     @property
     def agents(self):
@@ -572,14 +613,84 @@ class UAVPursuitEnv(object):
         输出:
             无。
         """
-        self.rng.seed(seed)
+        self.base_seed = int(seed)
+        self.rng.seed(self.base_seed)
+        self.position_rng.seed(self.base_seed)
 
-    def reset(self):
+    def set_regen_scope(self, scope: str):
+        """
+        功能:
+            设置regen采样使用的配置分支（train/eval）。
+        输入:
+            scope (str): 采样分支名称。
+        输出:
+            无。
+        """
+        self.regen_scope = str(scope).lower()
+
+    def reset(self, mode: str = "initial", task_spec: Optional[dict] = None):
         """
         功能:
             重置环境到episode初始状态并返回初始观测。
         输入:
+            mode (str): reset模式，支持initial/recover/regen。
+            task_spec (Optional[dict]): 可选任务规格，供regen或initial覆盖当前任务参数。
+        输出:
+            List[np.ndarray]: shape=(agent_num, obs_dim)。
+        """
+        mode_val = str(mode).lower()
+        if mode_val == "regen":
+            sampled_spec = task_spec if task_spec is not None else self._sample_regen_task_spec()
+            self._apply_task_spec(sampled_spec, reset_position_rng=True)
+            self._reset_target_route_state_for_recover()
+            self.initial_reset_count = 0
+            return self._reset_with_sampled_positions()
+
+        if mode_val == "recover":
+            recover_seed = self.base_seed if self.task_seed is None else int(self.task_seed)
+            self.position_rng.seed(int(recover_seed))
+            self._reset_target_route_state_for_recover()
+            return self._reset_with_sampled_positions()
+
+        if mode_val != "initial":
+            raise ValueError(f"Unsupported reset mode: {mode}")
+
+        # train阶段：按initial reset次数触发周期性regen
+        if self.regen_scope == "train" and task_spec is None and bool(self.train_split_cfg.enable):
+            self.initial_reset_count += 1
+            interval_hit = int(self.initial_reset_count) % int(self.train_split_cfg.regen_interval_episode) == 0
+            random_hit = float(self.rng.uniform(0.0, 1.0)) <= float(self.train_split_cfg.regen_prob)
+            if interval_hit and random_hit:
+                sampled_spec = self._sample_regen_task_spec()
+                self._apply_task_spec(sampled_spec, reset_position_rng=True)
+                self._reset_target_route_state_for_recover()
+                self.initial_reset_count = 0
+                return self._reset_with_sampled_positions()
+
+        if task_spec is not None:
+            self._apply_task_spec(task_spec, reset_position_rng=True)
+            self._reset_target_route_state_for_recover()
+            self.initial_reset_count = 0
+        return self._reset_with_sampled_positions()
+
+    def _reset_with_sampled_positions(self):
+        """
+        功能:
+            使用当前位置随机流采样初始位置并执行reset主逻辑。
+        输入:
             无。
+        输出:
+            List[np.ndarray]: shape=(agent_num, obs_dim)。
+        """
+        init_positions = self._sample_initial_positions()
+        return self._reset_to_positions(init_positions)
+
+    def _reset_to_positions(self, init_positions: np.ndarray):
+        """
+        功能:
+            将环境重置到指定初始位置，并按照active_hunter_mask启停Hunter。
+        输入:
+            init_positions (np.ndarray): shape=(agent_num,2)，各agent初始位置。
         输出:
             List[np.ndarray]: shape=(agent_num, obs_dim)。
         """
@@ -596,14 +707,160 @@ class UAVPursuitEnv(object):
         self.last_capture_step = None
         self.last_target_collided = False
         self.last_collision_pairs = []
+        self.hunter_reward_sum = 0.0
+        self.target_reward_sum = 0.0
+        self.reward_step_count = 0
+        self.hunter_reward_last = 0.0
+        self.target_reward_last = 0.0
 
-        # 步骤2：随机初始化所有agent
-        for agent in self.agents:
-            init_pos = self.rng.uniform(-self.world_size, self.world_size, size=2).astype(np.float32)
-            agent.reset(init_pos)
+        # 步骤2：按给定位置初始化所有agent
+        if init_positions.shape != (self.agent_num, 2):
+            raise ValueError(
+                f"init_positions shape mismatch: expected {(self.agent_num, 2)}, got {init_positions.shape}"
+            )
+
+        for hid, hunter in enumerate(self.hunters):
+            hunter.reset(np.asarray(init_positions[hid], dtype=np.float32))
+            if not bool(self.active_hunter_mask[hid]):
+                hunter.alive = False
+                hunter.position[:] = 0.0
+                hunter.velocity[:] = 0.0
+                hunter.heading = np.array([1.0, 0.0], dtype=np.float32)
+                hunter.trajectory = [hunter.position.copy()]
+                self.capture_counter[hid] = 0
+
+        self.target.reset(np.asarray(init_positions[self.target_index], dtype=np.float32))
 
         # 步骤3：返回初始观测
         return self._build_obs(team_sees_target=False)
+
+    def _apply_task_spec(self, task_spec: dict, reset_position_rng: bool = True):
+        """
+        功能:
+            应用任务规格（激活Hunter数量、Target策略与巡逻路线、初始化seed）。
+        输入:
+            task_spec (dict): 任务规格字典。
+            reset_position_rng (bool): 是否重置初始位置采样随机流。
+        输出:
+            无。
+        """
+        spec = dict(task_spec or {})
+
+        active_num_hunters = int(spec.get("num_hunters", self.num_hunters))
+        active_num_hunters = int(np.clip(active_num_hunters, 1, self.num_hunters))
+        self.active_num_hunters = active_num_hunters
+        self.active_hunter_mask[:] = False
+        self.active_hunter_mask[: self.active_num_hunters] = True
+
+        target_policy_source = str(spec.get("target_policy_source", self.default_target_policy_source)).lower()
+        target_patrol_path = str(spec.get("target_patrol_path", self.default_target_patrol_path))
+        target_patrol_names = list(spec.get("target_patrol_names", self.default_target_patrol_names))
+        target_route_id = int(spec.get("target_route_id", 0))
+
+        patrol_routes = self._load_patrol_routes(target_patrol_path, target_patrol_names)
+        if target_policy_source == "patrol" and len(patrol_routes) == 0:
+            target_policy_source = "random"
+        self.target_policy_source = target_policy_source
+        self.target.policy_type = target_policy_source
+        self.target.patrol_routes = patrol_routes
+        self.target.patrol_waypoints = patrol_routes[0] if len(patrol_routes) > 0 else []
+        self.target.route_index = 0
+        self.target.route_episode_count = 0
+        self.target.patrol_index = 0
+        self.patrol_routes = patrol_routes
+        self.active_target_patrol_names = list(target_patrol_names)
+        self.target_route_id = 0
+        if len(self.patrol_routes) > 0:
+            self.target_route_id = int(np.clip(target_route_id, 0, len(self.patrol_routes) - 1))
+            self.target.route_index = int(self.target_route_id)
+            self.target.patrol_waypoints = self.patrol_routes[self.target_route_id]
+
+        seed_val = spec.get("seed", None)
+        if seed_val is not None:
+            self.task_seed = int(seed_val)
+            if reset_position_rng:
+                self.position_rng.seed(self.task_seed)
+
+    def _reset_target_route_state_for_recover(self):
+        """
+        功能:
+            recover前重置Target巡逻状态，保证固定route下每次reset一致。
+        输入:
+            无。
+        输出:
+            无。
+        """
+        if self.target.policy_type != "patrol":
+            return
+        if len(self.patrol_routes) == 0:
+            return
+        route_id = int(np.clip(self.target_route_id, 0, len(self.patrol_routes) - 1))
+        self.target.route_index = route_id
+        self.target.route_episode_count = 0
+        self.target.patrol_index = 0
+        self.target.patrol_waypoints = self.patrol_routes[route_id]
+
+    def _sample_initial_positions(self):
+        """
+        功能:
+            采样所有agent初始位置。
+        输入:
+            无。
+        输出:
+            np.ndarray: shape=(agent_num,2)。
+        """
+        return self.position_rng.uniform(
+            -self.world_size, self.world_size, size=(self.agent_num, 2)
+        ).astype(np.float32)
+
+    def _sample_regen_task_spec(self):
+        """
+        功能:
+            按当前regen_scope从配置中采样一组任务规格。
+        输入:
+            无。
+        输出:
+            dict: 采样得到的任务规格。
+        """
+        split_cfg = self.train_split_cfg
+        if not bool(split_cfg.enable):
+            return {
+                "num_hunters": int(self.active_num_hunters),
+                "target_policy_source": str(self.target.policy_type),
+                "target_patrol_path": str(self.default_target_patrol_path),
+                "target_patrol_names": list(self.default_target_patrol_names),
+                "target_route_id": int(self.target_route_id),
+                "seed": self.base_seed if self.task_seed is None else int(self.task_seed),
+            }
+
+        hunter_choices = list(split_cfg.hunter_count_choices)
+        policy_choices = [str(x).lower() for x in list(split_cfg.target_policy_choices)]
+        patrol_choices = list(split_cfg.patrol_name_choices)
+        seed_range = list(split_cfg.seed_range)
+
+        num_hunters = int(self.rng.choice(hunter_choices))
+        target_policy_source = str(self.rng.choice(policy_choices))
+
+        target_patrol_names = list(self.default_target_patrol_names)
+        target_route_id = 0
+        if target_policy_source == "patrol":
+            if len(patrol_choices) > 0:
+                chosen_name = str(self.rng.choice(patrol_choices))
+                target_patrol_names = [chosen_name]
+            target_route_id = 0
+
+        seed_min = int(min(seed_range[0], seed_range[1]))
+        seed_max = int(max(seed_range[0], seed_range[1]))
+        seed_val = int(self.rng.randint(seed_min, seed_max + 1))
+
+        return {
+            "num_hunters": int(np.clip(num_hunters, 1, self.num_hunters)),
+            "target_policy_source": str(target_policy_source),
+            "target_patrol_path": str(self.default_target_patrol_path),
+            "target_patrol_names": list(target_patrol_names),
+            "target_route_id": int(target_route_id),
+            "seed": int(seed_val),
+        }
 
     def step(self, actions):
         """
@@ -644,11 +901,23 @@ class UAVPursuitEnv(object):
 
         # 步骤4：奖励聚合（通过统一函数返回总奖励与子项）
         rewards, reward_terms = self._compute_rewards(captured, collision_rewards)
+        active_hunter_rewards = rewards[: self.num_hunters]
+        hunter_reward_mean = (
+            float(np.mean(active_hunter_rewards)) if active_hunter_rewards.size > 0 else 0.0
+        )
+        target_reward_value = float(rewards[self.target_index]) if self.target_index < rewards.shape[0] else 0.0
+        self.hunter_reward_sum += hunter_reward_mean
+        self.target_reward_sum += target_reward_value
+        self.reward_step_count += 1
+        self.hunter_reward_last = hunter_reward_mean
+        self.target_reward_last = target_reward_value
 
         # 步骤5：终止条件判定
         self.step_count += 1
         timeout = self.step_count >= self.max_steps
-        all_hunters_dead = not any(h.alive for h in self.hunters)
+        all_hunters_dead = not any(
+            bool(self.active_hunter_mask[i]) and bool(h.alive) for i, h in enumerate(self.hunters)
+        )
         episode_end = timeout or captured or target_collided or all_hunters_dead
 
         if episode_end:
@@ -675,6 +944,9 @@ class UAVPursuitEnv(object):
                 "reward_hunter_streak": float(reward_terms["hunter_streak_reward"][i]),
                 "reward_target_streak": float(reward_terms["target_streak_reward"][i]),
                 "reward_capture": float(reward_terms["capture_reward"][i]),
+                "active_agent": bool(
+                    True if a.role != "hunter" else self.active_hunter_mask[int(i)]
+                ),
             }
             for i, a in enumerate(self.agents)
         ]
@@ -686,7 +958,7 @@ class UAVPursuitEnv(object):
             渲染当前场景，用于训练/评估GIF生成。
         输入:
             mode (str): 渲染模式，支持\"rgb_array\"与\"human\"。
-            title (str | None): 可选标题文本；None时使用默认标题。
+            title (str | None): 兼容参数，当前渲染标题由环境状态自动生成。
         输出:
             np.ndarray | None: mode为rgb_array时返回RGB图像；human时返回None。
         """
@@ -704,21 +976,13 @@ class UAVPursuitEnv(object):
         ax.set_xlabel("x (m)")
         ax.set_ylabel("y (m)")
 
-        # Step 3: 标题信息（含捕获/碰撞状态与步数）
-        capture_text = "Success" if self.last_episode_captured else "NoCapture"
-        capture_step_text = str(int(self.last_capture_step)) if self.last_capture_step is not None else "NA"
-        collision_text = "TargetCollided" if self.last_target_collided else "NoCollision"
-        if title is None:
-            title = (
-                f"Capture {capture_text} (step {capture_step_text}) | "
-                f"Collision {collision_text} | Step {int(self.step_count)}/{int(self.max_steps)}"
-            )
-        else:
-            title = (
-                f"{title} | Capture {capture_text} (step {capture_step_text}) | "
-                f"Collision {collision_text} | Step {int(self.step_count)}/{int(self.max_steps)}"
-            )
-        ax.set_title(title)
+        # Step 3: 标题信息（显示当前episode进度、瞬时奖励与累计奖励）
+        render_title = (
+            f"{int(self.step_count)}/{int(self.max_steps)} | "
+            f"Inst Ht {float(self.hunter_reward_last):.3f} Tgt {float(self.target_reward_last):.3f} | "
+            f"Cum Ht {float(self.hunter_reward_sum):.3f} Tgt {float(self.target_reward_sum):.3f}"
+        )
+        ax.set_title(render_title)
 
         # Step 4: 绘制轨迹渐隐、当前位置、速度向量、感知半径和碰撞半径
         hunter_colors = ["#1f77b4", "#2ca02c", "#ff7f0e", "#17becf", "#8c564b"]
@@ -870,7 +1134,9 @@ class UAVPursuitEnv(object):
                 edgecolors="black",
                 linewidths=0.5,
             )
-            for hunter in self.hunters:
+            for hid, hunter in enumerate(self.hunters):
+                if not bool(self.active_hunter_mask[hid]):
+                    continue
                 if not hunter.alive:
                     continue
                 ax.plot(
@@ -908,6 +1174,8 @@ class UAVPursuitEnv(object):
         # Step 7: 绘制图例
         legend_handles = []
         for hid in range(self.num_hunters):
+            if not bool(self.active_hunter_mask[hid]):
+                continue
             h_color = hunter_colors[hid % len(hunter_colors)]
             legend_handles.append(
                 Line2D(
@@ -921,9 +1189,19 @@ class UAVPursuitEnv(object):
                     label=f"Hunter-{hid}",
                 )
             )
+        target_policy_type = str(self.target.policy_type).lower()
+        if target_policy_type == "patrol":
+            route_name = "NA"
+            if len(self.active_target_patrol_names) > 0 and len(self.patrol_routes) > 0:
+                route_id = int(np.clip(self.target_route_id, 0, len(self.active_target_patrol_names) - 1))
+                route_name = str(self.active_target_patrol_names[route_id])
+            target_label = f"Target ({target_policy_type}:{route_name})"
+        else:
+            target_label = f"Target ({target_policy_type})"
+
         legend_handles.extend(
             [
-                Line2D([0], [0], marker="s", color="w", markerfacecolor="#d62728", markeredgecolor="black", markersize=7, label="Target"),
+                Line2D([0], [0], marker="s", color="w", markerfacecolor="#d62728", markeredgecolor="black", markersize=7, label=target_label),
                 Line2D([0], [0], color="#1f77b4", lw=1.0, linestyle=":", label="Perception Radius"),
                 Line2D([0], [0], color="#7f7f7f", lw=1.0, linestyle="-.", label="Safe Distance"),
                 Line2D([0], [0], color="#bcbd22", lw=1.1, linestyle="-.", label="Target Capture Range"),
@@ -935,7 +1213,15 @@ class UAVPursuitEnv(object):
                 Line2D([0], [0], marker="X", color="w", markerfacecolor="black", markeredgecolor="black", markersize=8, label="Collision Event"),
             ]
         )
-        ax.legend(handles=legend_handles, loc="upper right", fontsize=7, framealpha=0.85)
+        ax.legend(
+            handles=legend_handles,
+            loc="upper left",
+            bbox_to_anchor=(1.02, 1.0),
+            fontsize=7,
+            framealpha=0.85,
+            borderaxespad=0.0,
+        )
+        fig.subplots_adjust(right=0.72)
 
         # Step 8: 返回RGB数组或直接展示
         if mode == "human":
@@ -971,7 +1257,9 @@ class UAVPursuitEnv(object):
         """
         if not self.target.alive:
             return False
-        for h in self.hunters:
+        for hid, h in enumerate(self.hunters):
+            if not bool(self.active_hunter_mask[hid]):
+                continue
             if not h.alive:
                 continue
             if self.hunter_perception_radius < 0:
@@ -1024,6 +1312,9 @@ class UAVPursuitEnv(object):
             bool: True表示满足capture_step连续捕获条件。
         """
         for i, h in enumerate(self.hunters):
+            if not bool(self.active_hunter_mask[i]):
+                self.capture_counter[i] = 0
+                continue
             if not h.alive:
                 self.capture_counter[i] = 0
                 continue
@@ -1123,6 +1414,8 @@ class UAVPursuitEnv(object):
 
         # 2. streak reward: 要求hunter尽可能长期处于Target捕捉半径内
         for i, h in enumerate(self.hunters):
+            if not bool(self.active_hunter_mask[i]):
+                continue
             d = float(np.linalg.norm(h.position - self.target.position))
             hunter_d.append(d)
 
@@ -1198,6 +1491,8 @@ class UAVPursuitEnv(object):
         capture_dis_safe = max(float(self.capture_dis), 1e-6)
         hunter_d = []
         for i, h in enumerate(self.hunters):
+            if not bool(self.active_hunter_mask[i]):
+                continue
             d = float(np.linalg.norm(h.position - self.target.position))
             hunter_d.append(d)
             if d <= capture_dis_safe:
@@ -1217,7 +1512,7 @@ class UAVPursuitEnv(object):
     def _build_obs(self, team_sees_target):
         """
         功能:
-            组装每个agent的观测向量（own + pair + memory）。
+            组装每个agent的观测向量（own + neighbor + target + memory）。
         输入:
             team_sees_target (bool): 追捕组是否共享可见target信息。
         输出:
@@ -1226,15 +1521,108 @@ class UAVPursuitEnv(object):
         scale = max(self.world_size, 1e-6)
         obs = []
         for i, ai in enumerate(self.agents):
+            if i < self.num_hunters and not bool(self.active_hunter_mask[i]):
+                obs.append(np.zeros(self.obs_dim, dtype=np.float32))
+                continue
             own = np.concatenate([ai.position / scale, ai.velocity / scale]).astype(np.float32)
-            parts = [own]
-            for j, aj in enumerate(self.agents):
-                if i == j:
-                    continue
-                parts.append(self._pair_obs(i, j, team_sees_target, scale))
-            parts.append(self._memory_obs(i, team_sees_target, scale))
+            neighbor_obs = self._neighbor_obs(i, scale)
+            target_obs = self._target_obs(i, team_sees_target, scale)
+            memory_obs = self._memory_obs(i, team_sees_target, scale)
+            parts = [own, neighbor_obs, target_obs, memory_obs]
             obs.append(np.concatenate(parts, axis=0).astype(np.float32))
         return obs
+
+    def _neighbor_obs(self, obs_idx, scale):
+        """
+        功能:
+            构造观测智能体的最近同阵营邻居观测（固定槽位 + valid mask）。
+        输入:
+            obs_idx (int): 观测者索引。
+            scale (float): 归一化尺度（world_size）。
+        输出:
+            np.ndarray: shape=(neighbor_N * 6,)。
+        """
+        if self.neighbor_N <= 0:
+            return np.zeros(0, dtype=np.float32)
+
+        ai = self.agents[obs_idx]
+        candidates = []
+        for j, aj in enumerate(self.agents):
+            if j == obs_idx:
+                continue
+            # 同阵营定义：hunter之间互为邻居；target无同阵营邻居（当前单target）
+            if (
+                ai.role == "hunter"
+                and aj.role == "hunter"
+                and aj.alive
+                and bool(self.active_hunter_mask[j])
+            ):
+                dist = float(np.linalg.norm(aj.position - ai.position))
+                candidates.append((dist, j))
+
+        candidates.sort(key=lambda x: x[0])
+        selected = candidates[: self.neighbor_N]
+
+        slots = []
+        for _, j in selected:
+            aj = self.agents[j]
+            rel_pos = (aj.position - ai.position) / scale
+            rel_vel = (aj.velocity - ai.velocity) / scale
+            dist = np.linalg.norm(aj.position - ai.position) / scale
+            slots.append(
+                np.array(
+                    [rel_pos[0], rel_pos[1], rel_vel[0], rel_vel[1], dist, 1.0],
+                    dtype=np.float32,
+                )
+            )
+
+        while len(slots) < self.neighbor_N:
+            slots.append(np.zeros(self.neighbor_feat_dim, dtype=np.float32))
+
+        return np.concatenate(slots, axis=0).astype(np.float32)
+
+    def _target_obs(self, obs_idx, team_sees_target, scale):
+        """
+        功能:
+            构造target字段观测（hunter看target；target看最近hunter）。
+        输入:
+            obs_idx (int): 观测者索引。
+            team_sees_target (bool): 追捕组是否共享可见target信息。
+            scale (float): 归一化尺度（world_size）。
+        输出:
+            np.ndarray: shape=(6,), [dx,dy,dvx,dvy,d,visible]。
+        """
+        ai = self.agents[obs_idx]
+
+        # Hunter侧：观测target，是否可见由team共享可见性控制。
+        if ai.role == "hunter":
+            if (not self.target.alive) or (not team_sees_target):
+                return np.zeros(self.target_feat_dim, dtype=np.float32)
+            rel_pos = (self.target.position - ai.position) / scale
+            rel_vel = (self.target.velocity - ai.velocity) / scale
+            dist = np.linalg.norm(self.target.position - ai.position) / scale
+            return np.array(
+                [rel_pos[0], rel_pos[1], rel_vel[0], rel_vel[1], dist, 1.0],
+                dtype=np.float32,
+            )
+
+        # Target侧：观测最近且存活的hunter，visible表示是否存在有效hunter。
+        alive_hunters = [
+            h for idx, h in enumerate(self.hunters) if h.alive and bool(self.active_hunter_mask[idx])
+        ]
+        if len(alive_hunters) == 0:
+            return np.zeros(self.target_feat_dim, dtype=np.float32)
+        nearest_hunter = min(
+            alive_hunters,
+            key=lambda h: float(np.linalg.norm(h.position - ai.position)),
+        )
+        rel_pos = (nearest_hunter.position - ai.position) / scale
+        rel_vel = (nearest_hunter.velocity - ai.velocity) / scale
+        dist = np.linalg.norm(nearest_hunter.position - ai.position) / scale
+        return np.array(
+            [rel_pos[0], rel_pos[1], rel_vel[0], rel_vel[1], dist, 1.0],
+            dtype=np.float32,
+        )
 
     def _pair_obs(self, i, j, team_sees_target, scale):
         """
@@ -1290,6 +1678,8 @@ class UAVPursuitEnv(object):
         """
         # 对target自身，该槽位始终无效。
         if obs_idx == self.target_index:
+            return np.zeros(5, dtype=np.float32)
+        if obs_idx < self.num_hunters and not bool(self.active_hunter_mask[obs_idx]):
             return np.zeros(5, dtype=np.float32)
 
         # 去冗余策略：

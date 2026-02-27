@@ -666,27 +666,9 @@ class ObsVisApp:
             return
 
         obs = np.asarray(self.obs_cache[self.selected_index], dtype=np.float32).reshape(-1)
-        agent_num = int(self.core_env.agent_num)
-        target_index = int(self.core_env.target_index)
-
-        headers: list[str] = ["own_obs"]
-        values: list[str] = [
-            " ".join(f"{v:.4f}" for v in obs[0:4])
-        ]
-        start = 4
-        pair_id = 1
-        for j in range(agent_num):
-            if j == self.selected_index:
-                continue
-            if j == target_index:
-                headers.append("target_obs")
-            else:
-                headers.append(f"pair_obs{pair_id}")
-            values.append(" ".join(f"{v:.4f}" for v in obs[start : start + 5]))
-            start += 5
-            pair_id += 1
-        headers.append("share_mem")
-        values.append(" ".join(f"{v:.4f}" for v in obs[start : start + 5]))
+        segments = self._split_obs_segments(obs)
+        headers = [name for name, _arr in segments]
+        values = [" ".join(f"{v:.4f}" for v in arr) for _name, arr in segments]
 
         widths = [max(len(h), len(v), 18) for h, v in zip(headers, values)]
 
@@ -702,33 +684,44 @@ class ObsVisApp:
         if self.core_env is None:
             return np.array2string(obs, precision=4, separator=", ")
 
-        agent_num = int(self.core_env.agent_num)
-        target_index = int(self.core_env.target_index)
         obs = np.asarray(obs, dtype=np.float32).reshape(-1)
+        segments = self._split_obs_segments(obs)
 
         lines = []
+        for name, arr in segments:
+            lines.append(f"{name}:")
+            lines.append("  " + np.array2string(arr, precision=4, separator=", "))
+        return "\n".join(lines)
+
+    def _split_obs_segments(self, obs: np.ndarray) -> list[tuple[str, np.ndarray]]:
+        if self.core_env is None:
+            return [("obs", np.asarray(obs, dtype=np.float32).reshape(-1))]
+
+        flat = np.asarray(obs, dtype=np.float32).reshape(-1)
+        own_dim = 4
+        neighbor_n = int(getattr(self.core_env, "neighbor_N", 0))
+        neighbor_feat_dim = int(getattr(self.core_env, "neighbor_feat_dim", 6))
+        target_feat_dim = int(getattr(self.core_env, "target_feat_dim", 6))
+
+        segments: list[tuple[str, np.ndarray]] = []
         start = 0
 
-        own = obs[start : start + 4]
-        lines.append("own_obs:")
-        lines.append("  " + np.array2string(own, precision=4, separator=", "))
-        start += 4
+        own_end = min(start + own_dim, len(flat))
+        segments.append(("own_obs", flat[start:own_end]))
+        start += own_dim
 
-        pair_id = 1
-        for j in range(agent_num):
-            if j == obs_idx:
-                continue
-            seg = obs[start : start + 5]
-            title = "target_obs:" if j == target_index else f"pair_obs{pair_id}:"
-            lines.append(title)
-            lines.append("  " + np.array2string(seg, precision=4, separator=", "))
-            start += 5
-            pair_id += 1
+        for i in range(neighbor_n):
+            end = min(start + neighbor_feat_dim, len(flat))
+            segments.append((f"neighbor_obs{i + 1}", flat[start:end]))
+            start += neighbor_feat_dim
 
-        mem = obs[start : start + 5]
-        lines.append("share_mem_obs:")
-        lines.append("  " + np.array2string(mem, precision=4, separator=", "))
-        return "\n".join(lines)
+        target_end = min(start + target_feat_dim, len(flat))
+        segments.append(("target_obs", flat[start:target_end]))
+        start += target_feat_dim
+
+        mem = flat[start:] if start < len(flat) else np.zeros(0, dtype=np.float32)
+        segments.append(("share_mem_obs", mem))
+        return segments
 
     def _draw_scene(self) -> None:
         if self.core_env is None:

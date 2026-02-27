@@ -20,6 +20,8 @@ class DummyVecEnv():
         self.actions = None
         # 仅在需要录制GIF的阶段抓取终止帧，避免常规训练额外渲染开销。
         self.capture_terminal_frame = False
+        self.auto_reset_mode = "initial"
+        self.auto_reset_task_specs = None
 
     def step(self, actions):
         """
@@ -50,14 +52,35 @@ class DummyVecEnv():
                     for agent_info in env_infos:
                         if isinstance(agent_info, dict):
                             agent_info["terminal_frame"] = terminal_frame
-                obs[i] = self.envs[i].reset()
+                task_spec_i = None
+                if self.auto_reset_task_specs is not None and i < len(self.auto_reset_task_specs):
+                    task_spec_i = self.auto_reset_task_specs[i]
+                obs[i] = self.envs[i].reset(mode=self.auto_reset_mode, task_spec=task_spec_i)
 
         self.actions = None
         return obs, rews, dones, infos
 
-    def reset(self):
-        obs = [env.reset() for env in self.envs] # [env_num, agent_num, obs_dim]
+    def reset(self, mode="initial", task_specs=None):
+        obs = []
+        for i, env in enumerate(self.envs):
+            task_spec_i = None
+            if task_specs is not None and i < len(task_specs):
+                task_spec_i = task_specs[i]
+            obs.append(env.reset(mode=mode, task_spec=task_spec_i))
         return np.array(obs)
+
+    def reset_task(self, mode="regen", task_specs=None):
+        """
+        强制所有向量环境执行一次指定模式重置，常用于episode边界任务重生成。
+        """
+        return self.reset(mode=mode, task_specs=task_specs)
+
+    def set_auto_reset(self, mode="initial", task_specs=None):
+        """
+        设置step_wait内done后自动reset的模式和任务规格。
+        """
+        self.auto_reset_mode = str(mode)
+        self.auto_reset_task_specs = task_specs
 
     def close(self):
         for env in self.envs:

@@ -1,0 +1,27 @@
+tasks:
+  - {num_hunters: 1, seed: 21001, target_policy_source: random, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["square"], target_route_id: 0}
+  - {num_hunters: 1, seed: 21002, target_policy_source: patrol, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["square"], target_route_id: 0}
+  - {num_hunters: 1, seed: 21003, target_policy_source: patrol, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["ring"], target_route_id: 0}
+  - {num_hunters: 1, seed: 21004, target_policy_source: patrol, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["vert_trig"], target_route_id: 0}
+  - {num_hunters: 1, seed: 21005, target_policy_source: patrol, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["hori_trig"], target_route_id: 0}
+  - {num_hunters: 1, seed: 21006, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_003"], target_route_id: 0}
+  - {num_hunters: 1, seed: 21007, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_011"], target_route_id: 0}
+  - {num_hunters: 1, seed: 21008, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_019"], target_route_id: 0}
+
+  - {num_hunters: 2, seed: 22001, target_policy_source: random, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["ring"], target_route_id: 0}
+  - {num_hunters: 2, seed: 22002, target_policy_source: patrol, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["square"], target_route_id: 0}
+  - {num_hunters: 2, seed: 22003, target_policy_source: patrol, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["hori_bcd"], target_route_id: 0}
+  - {num_hunters: 2, seed: 22004, target_policy_source: patrol, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["rnd1"], target_route_id: 0}
+  - {num_hunters: 2, seed: 22005, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_005"], target_route_id: 0}
+  - {num_hunters: 2, seed: 22006, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_014"], target_route_id: 0}
+  - {num_hunters: 2, seed: 22007, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_023"], target_route_id: 0}
+  - {num_hunters: 2, seed: 22008, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_030"], target_route_id: 0}
+
+  - {num_hunters: 3, seed: 23001, target_policy_source: random, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["square"], target_route_id: 0}
+  - {num_hunters: 3, seed: 23002, target_policy_source: patrol, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["ring"], target_route_id: 0}
+  - {num_hunters: 3, seed: 23003, target_policy_source: patrol, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["vert_trig"], target_route_id: 0}
+  - {num_hunters: 3, seed: 23004, target_policy_source: patrol, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["hori_trig"], target_route_id: 0}
+  - {num_hunters: 3, seed: 23005, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_007"], target_route_id: 0}
+  - {num_hunters: 3, seed: 23006, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_016"], target_route_id: 0}
+  - {num_hunters: 3, seed: 23007, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_024"], target_route_id: 0}
+  - {num_hunters: 3, seed: 23008, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_029"], target_route_id: 0}

@@ -99,17 +99,29 @@ class ContinuousActionEnv(object):
         obs, rews, dones, infos = results
         return np.stack(obs), np.stack(rews), np.stack(dones), infos
 
-    def reset(self):
+    def reset(self, mode="initial", task_spec=None):
         """
         功能:
             重置底层环境并返回初始观测。
         输入:
-            无。
+            mode (str): 重置模式，支持initial/recover/regen。
+            task_spec (dict | None): 可选任务规格。
         输出:
             np.ndarray: shape=(agent_num, obs_dim)。
         """
-        obs = self.env.reset()
+        obs = self.env.reset(mode=mode, task_spec=task_spec)
         return np.stack(obs)
+
+    def set_regen_scope(self, scope: str):
+        """
+        功能:
+            设置底层环境regen采样分支。
+        输入:
+            scope (str): 采样分支，通常为train或eval。
+        输出:
+            无。
+        """
+        self.env.set_regen_scope(scope)
 
     def close(self):
         """
