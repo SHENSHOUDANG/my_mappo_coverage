@@ -184,9 +184,13 @@ class BaseAgent(object):
             if speed > self.max_speed and speed > 1e-8:
                 self.velocity = self.velocity / speed * self.max_speed
         else:
-            # velocity模式: 动作表示目标速度，并施加单步转角上限约束。
+            # velocity模式: 动作表示目标速度；Target的random/patrol策略允许自由转向。
             desired_velocity = u * self.max_speed
-            self.velocity = self._apply_turn_limit(self.velocity, desired_velocity)
+            bypass_turn_limit = (
+                self.role == "target"
+                and self.policy_type in ("random", "patrol")
+            )
+            self.velocity = desired_velocity if bypass_turn_limit else self._apply_turn_limit(self.velocity, desired_velocity)
 
         self.position = self.position + self.velocity * float(dt)
         self.position = np.clip(self.position, -float(world_size), float(world_size))
@@ -337,6 +341,7 @@ class TargetAgent(BaseAgent):
         patrol_routes: Optional[List[List[np.ndarray]]] = None,
         switch_interval: int = 1,
         control_dt: float = 1.0,
+        world_size: float = 1.0,
     ):
         """
         功能:
@@ -356,6 +361,7 @@ class TargetAgent(BaseAgent):
             patrol_routes (Optional[List[List[np.ndarray]]]): 可选巡逻路线集合。
             switch_interval (int): 路线切换间隔（按episode计）。
             control_dt (float): 环境控制步长dt（秒），用于patrol速度缩放。
+            world_size (float): 地图半边长（米），用于random策略边界修正。
         输出:
             无。
         """
@@ -378,6 +384,7 @@ class TargetAgent(BaseAgent):
         )
         self.switch_interval = max(1, int(switch_interval))
         self.control_dt = float(max(1e-6, control_dt))
+        self.world_size = float(max(1e-6, world_size))
         self.route_episode_count = 0
         self.route_index = 0
         self.patrol_index = 0
@@ -437,7 +444,49 @@ class TargetAgent(BaseAgent):
         """
         if self.policy_type == "patrol":
             return self._patrol_action()
+        if self.policy_type == "random":
+            raw_random_action = super().select_action(step_count, action_from_policy, rng)
+            return self._random_action_with_boundary_avoidance(raw_random_action)
         return super().select_action(step_count, action_from_policy, rng)
+
+    def _random_action_with_boundary_avoidance(self, random_action: np.ndarray) -> np.ndarray:
+        """
+        功能:
+            random策略下对动作做边界安全修正；若预测下一时刻靠近边界，则叠加朝向中心的最大径向分量。
+        输入:
+            random_action (np.ndarray): shape=(2,), 原始随机动作（归一化）。
+        输出:
+            np.ndarray: shape=(2,), 修正后的随机动作（归一化）。
+        """
+        # Step 1: 预测下一时刻位置
+        base_action = np.clip(np.asarray(random_action, dtype=np.float32), -1.0, 1.0)
+        if self.control_mode == "acceleration":
+            predicted_vel = self.velocity + base_action * float(self.max_acc) * float(self.control_dt)
+            speed = float(np.linalg.norm(predicted_vel))
+            if speed > float(self.max_speed) and speed > 1e-8:
+                predicted_vel = predicted_vel / speed * float(self.max_speed)
+        else:
+            predicted_vel = base_action * float(self.max_speed)
+        p_next = self.position + predicted_vel * float(self.control_dt)
+
+        # Step 2: 下一时刻进入边界风险区时，叠加朝向中心的最大径向动作分量
+        boundary_dist = float(max(0.0, self.world_size - max(abs(float(p_next[0])), abs(float(p_next[1])))))
+        if boundary_dist >= float(self.safe_dis):
+            return base_action
+
+        center_vec = -np.asarray(p_next, dtype=np.float32)
+        center_norm = float(np.linalg.norm(center_vec))
+        if center_norm <= 1e-8:
+            return base_action
+        center_dir = center_vec / center_norm
+        if self.control_mode == "acceleration":
+            radial_action = np.clip(center_dir, -1.0, 1.0).astype(np.float32)
+        else:
+            radial_action = np.clip(center_dir, -1.0, 1.0).astype(np.float32)
+        adjusted_action = base_action + radial_action
+
+        # Step 3: 裁剪后返回有效动作
+        return np.clip(adjusted_action, -1.0, 1.0).astype(np.float32)
 
     def _patrol_action(self) -> np.ndarray:
         """
@@ -538,6 +587,7 @@ class UAVPursuitEnv(object):
 
         self.hunter_perception_radius = float(hunter_cfg.perception_radius)
         self.target_perception_radius = float(target_cfg.perception_radius)
+        self.target_safe_dis = float(max(self.collision_dis, float(target_cfg.safe_dis)))
         self.collision_penalty_k = float(reward_cfg.collision_penalty_k)
         self.safe_zone_penalty_scale = float(reward_cfg.safe_zone_penalty_scale)
         self.collision_penalty_cap = float(reward_cfg.collision_penalty_cap)
@@ -604,7 +654,7 @@ class UAVPursuitEnv(object):
         self.target = TargetAgent(
             agent_id=self.target_index,
             max_speed=float(target_cfg.max_velo),
-            safe_dis=float(max(self.collision_dis, float(target_cfg.safe_dis))),
+            safe_dis=float(self.target_safe_dis),
             control_mode=str(target_cfg.control_mode).lower(),
             max_acc=float(target_cfg.max_acc),
             max_turn_angle=float(target_cfg.max_turn_angle),
@@ -615,6 +665,7 @@ class UAVPursuitEnv(object):
             patrol_routes=patrol_routes,
             switch_interval=max(1, self.target_switch_interval),
             control_dt=float(self.dt),
+            world_size=float(self.world_size),
         )
         self.patrol_routes = patrol_routes
         self.default_target_policy_source = str(self.target_policy_source)
@@ -1825,7 +1876,7 @@ class UAVPursuitEnv(object):
     def _load_patrol_routes(self, route_path, route_names):
         """
         功能:
-            从JSON加载巡逻路线并转换到环境全局坐标系。
+            从JSON加载巡逻路线并转换到环境全局坐标系，同时过滤边界危险区航点。
         输入:
             route_path (str): 路线文件路径（绝对路径或项目相对路径）。
             route_names (list[str]): 指定路线名；空列表或包含\"all\"时加载全部。
@@ -1860,6 +1911,17 @@ class UAVPursuitEnv(object):
             if coord_mode == "normalized_0_1":
                 points = (points * 2.0 - 1.0) * self.world_size
             points = np.clip(points, -self.world_size, self.world_size).astype(np.float32)
-            routes.append([p for p in points])
+            # Step 1: 过滤边界危险区（距离最近边界 <= target_safe_dis）的航点
+            filtered_points = []
+            for p in points:
+                boundary_dist = float(max(0.0, self.world_size - max(abs(float(p[0])), abs(float(p[1])))))
+                if boundary_dist <= float(self.target_safe_dis):
+                    continue
+                filtered_points.append(np.asarray(p, dtype=np.float32))
+
+            # Step 2: 若过滤后航点为空，跳过该路线
+            if len(filtered_points) == 0:
+                continue
+            routes.append(filtered_points)
             self._last_loaded_patrol_route_names.append(name)
         return routes
