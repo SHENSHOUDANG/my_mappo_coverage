@@ -559,6 +559,7 @@ class UAVPursuitEnv(object):
 
         # 步骤2：初始化环境物理参数与奖励参数
         self.world_size = float(env_cfg.world_size)
+        self.default_world_size = float(self.world_size)
         self.dt = float(env_cfg.dt)
         self.max_steps = int(env_cfg.episode_length)
         self.num_hunters = int(env_cfg.num_hunters)
@@ -730,6 +731,7 @@ class UAVPursuitEnv(object):
 
         if mode_val == "recover":
             recover_seed = self.base_seed if self.task_seed is None else int(self.task_seed)
+            self.rng.seed(int(recover_seed))
             self.position_rng.seed(int(recover_seed))
             self._reset_target_route_state_for_recover()
             return self._reset_with_sampled_positions()
@@ -820,7 +822,7 @@ class UAVPursuitEnv(object):
     def _apply_task_spec(self, task_spec: dict, reset_position_rng: bool = True):
         """
         功能:
-            应用任务规格（激活Hunter数量、Target策略与巡逻路线、初始化seed）。
+            应用任务规格（激活Hunter数量、地图尺寸、Target策略与巡逻路线、初始化seed）。
         输入:
             task_spec (dict): 任务规格字典。
             reset_position_rng (bool): 是否重置初始位置采样随机流。
@@ -828,6 +830,11 @@ class UAVPursuitEnv(object):
             无。
         """
         spec = dict(task_spec or {})
+
+        # Step 0: 应用任务指定world_size；未指定时回退到环境初始world_size
+        world_size = float(spec.get("world_size", self.default_world_size))
+        self.world_size = float(max(1e-6, world_size))
+        self.target.world_size = float(self.world_size)
 
         active_num_hunters = int(spec.get("num_hunters", self.num_hunters))
         active_num_hunters = int(np.clip(active_num_hunters, 1, self.num_hunters))
@@ -913,6 +920,7 @@ class UAVPursuitEnv(object):
         if not bool(split_cfg.enable):
             return {
                 "num_hunters": int(self.active_num_hunters),
+                "world_size": float(self.world_size),
                 "target_policy_source": str(self.target.policy_type),
                 "target_patrol_path": str(self.default_target_patrol_path),
                 "target_patrol_names": list(self.default_target_patrol_names),
@@ -942,6 +950,7 @@ class UAVPursuitEnv(object):
 
         return {
             "num_hunters": int(np.clip(num_hunters, 1, self.num_hunters)),
+            "world_size": float(self.world_size),
             "target_policy_source": str(target_policy_source),
             "target_patrol_path": str(self.default_target_patrol_path),
             "target_patrol_names": list(target_patrol_names),
