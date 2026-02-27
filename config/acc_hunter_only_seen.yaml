@@ -1,6 +1,6 @@
 exp:
   algorithm_name: rmappo
-  experiment_name: acc5v1_base_rnd_Eval-h8
+  experiment_name: acc5v1_base_Eval-h8
   seed: 1
   cuda: true
   cuda_deterministic: true
@@ -125,7 +125,7 @@ schedule:
   use_linear_lr_decay: false
 
 logging:
-  log_gif: true         # 训练阶段是否按规则保存GIF
+  log_gif: false         # 训练阶段是否按规则保存GIF
 
 eval:
   fixed_tasks: []
@@ -133,7 +133,7 @@ eval:
 
 domain_randomization:
   train_split:
-    enable: true
+    enable: false
     regen_interval_episode: 50
     regen_prob: 1.0
     hunter_count_choices: [1, 2, 3, 4, 5]

@@ -105,7 +105,7 @@ class BaseAgent(object):
         self._cached_random_action = np.zeros(2, dtype=np.float32)
         self._last_random_refresh_step = -1
 
-        print(f"{role} Agent {agent_id}: Policy type: {policy_type}")
+        # print(f"{role} Agent {agent_id}: Policy type: {policy_type}")
 
     def reset(self, init_pos: np.ndarray):
         """

@@ -136,7 +136,7 @@ logging:
   save_interval: 40     # ckpts 保存episode间隔
   log_interval: 10      # 打印中间结果episode间隔
   log_gif: true         # 训练阶段是否按规则保存GIF
-  gif_frame_interval: 5       # GIF抽帧间隔
+  gif_frame_interval: 10      # GIF抽帧间隔
   gif_frame_duration: 0.3
 
 # Evaluation settings

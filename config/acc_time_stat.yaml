@@ -125,7 +125,7 @@ schedule:
   use_linear_lr_decay: false
 
 logging:
-  log_gif: true         # 训练阶段是否按规则保存GIF
+  log_gif: false         # 训练阶段是否按规则保存GIF
 
 eval:
   fixed_tasks: []

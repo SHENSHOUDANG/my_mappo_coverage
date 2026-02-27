@@ -15,6 +15,7 @@ sys.path.append(parent_dir)
 import argparse
 import json
 from pathlib import Path
+import copy
 
 import numpy as np
 import setproctitle
@@ -94,6 +95,33 @@ def _build_target_learn_eval_specs(eval_task_specs):
         s["target_policy_source"] = "learn"
         out.append(s)
     return out
+
+
+def _infer_max_num_hunters_from_eval_tasks(eval_task_specs, fallback_num_hunters):
+    """
+    从固定评估任务中推断所需的最大hunter数量。
+
+    输入:
+        eval_task_specs (list[dict] | None): 固定评估任务列表。
+        fallback_num_hunters (int): 当任务未提供num_hunters时的回退值。
+    输出:
+        int: 评估任务要求的最大hunter数量（最小为1）。
+    """
+    # Step 1: 空任务回退到配置值。
+    if eval_task_specs is None or len(eval_task_specs) == 0:
+        return int(max(1, int(fallback_num_hunters)))
+
+    # Step 2: 扫描所有任务的num_hunters并取最大值。
+    max_hunters = int(max(1, int(fallback_num_hunters)))
+    for spec in eval_task_specs:
+        if not isinstance(spec, dict):
+            continue
+        num_h = spec.get("num_hunters", max_hunters)
+        try:
+            max_hunters = max(max_hunters, int(num_h))
+        except Exception:
+            continue
+    return int(max(1, max_hunters))
 
 
 def _print_domain_randomization_settings(merged_cfg, eval_task_specs):
@@ -183,6 +211,14 @@ def make_eval_env(merged_cfg, eval_task_specs):
         DummyVecEnv: 评估向量环境。
     """
 
+    # Step 0: 使用fixed task中最大num_hunters构建eval配置，避免active_hunter被环境上限截断。
+    eval_cfg = copy.deepcopy(merged_cfg)
+    required_eval_hunters = _infer_max_num_hunters_from_eval_tasks(
+        eval_task_specs=eval_task_specs,
+        fallback_num_hunters=int(merged_cfg.env.num_hunters),
+    )
+    eval_cfg.env.num_hunters = int(required_eval_hunters)
+
     def get_env_fn(rank):
         """
         输入:
@@ -200,15 +236,15 @@ def make_eval_env(merged_cfg, eval_task_specs):
             """
             from envs.env_continuous import ContinuousActionEnv
 
-            env = ContinuousActionEnv(merged_cfg)
+            env = ContinuousActionEnv(eval_cfg)
             env.set_regen_scope("eval")
-            env.seed(int(merged_cfg.exp.seed) * 10 + rank * 1000)
+            env.seed(int(eval_cfg.exp.seed) * 10 + rank * 1000)
             return env
 
         return init_env
 
     eval_env = DummyVecEnv(
-        [get_env_fn(i) for i in range(int(merged_cfg.exp.n_eval_rollout_threads))]
+        [get_env_fn(i) for i in range(int(eval_cfg.exp.n_eval_rollout_threads))]
     )
     if eval_task_specs is None:
         raise ValueError("Eval requires fixed tasks. Please set eval.fixed_tasks or eval.fixed_tasks_file.")
@@ -311,6 +347,19 @@ def main(args):
                 int(merged_cfg.exp.n_eval_rollout_threads)
             )
         )
+    if bool(merged_cfg.eval.use_eval):
+        required_eval_hunters = _infer_max_num_hunters_from_eval_tasks(
+            eval_task_specs=eval_task_specs,
+            fallback_num_hunters=int(merged_cfg.env.num_hunters),
+        )
+        if int(required_eval_hunters) != int(merged_cfg.env.num_hunters):
+            print(
+                "[EvalConfig] override env.num_hunters={} (max from fixed tasks; old={})".format(
+                    int(required_eval_hunters),
+                    int(merged_cfg.env.num_hunters),
+                )
+            )
+            merged_cfg.env.num_hunters = int(required_eval_hunters)
     _print_domain_randomization_settings(merged_cfg, eval_task_specs)
     envs = make_train_env(merged_cfg)
     eval_envs = make_eval_env(merged_cfg, eval_task_specs) if bool(merged_cfg.eval.use_eval) else None

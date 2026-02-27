@@ -1,10 +1,10 @@
 exp:
   algorithm_name: rmappo
-  experiment_name: vel5v1_base
+  experiment_name: vel5v1_base_Eval-h8
   seed: 1
   cuda: true
   cuda_deterministic: true
-  n_training_threads: 2
+  n_training_threads: 4
   n_rollout_threads: 5
   n_eval_rollout_threads: 10
   n_render_rollout_threads: 1
@@ -12,7 +12,7 @@ exp:
 
 # Environment settings (common)
 env:
-  env_name: hunter_only
+  env_name: Hunter_colli
   world_size: 100
   episode_length: 400 # max steps per episode
   dt: 0.1
@@ -125,11 +125,11 @@ schedule:
   use_linear_lr_decay: false
 
 logging:
-  log_gif: true         # 训练阶段是否按规则保存GIF
+  log_gif: false         # 训练阶段是否按规则保存GIF
 
 eval:
   fixed_tasks: []
-  fixed_tasks_file: config/eval_tasks/eval_enhance.yaml
+  fixed_tasks_file: config/eval_tasks/patrol_tasks_h8_n100.yaml
 
 domain_randomization:
   train_split:

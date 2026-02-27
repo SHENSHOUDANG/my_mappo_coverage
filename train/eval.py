@@ -22,6 +22,7 @@ import torch
 from utils.util import load_config
 from train.train import (
     _build_target_learn_eval_specs,
+    _infer_max_num_hunters_from_eval_tasks,
     _load_eval_task_specs,
     _print_domain_randomization_settings,
     make_eval_env,
@@ -114,6 +115,18 @@ def main(args):
                 int(merged_cfg.exp.n_eval_rollout_threads)
             )
         )
+    required_eval_hunters = _infer_max_num_hunters_from_eval_tasks(
+        eval_task_specs=eval_task_specs,
+        fallback_num_hunters=int(merged_cfg.env.num_hunters),
+    )
+    if int(required_eval_hunters) != int(merged_cfg.env.num_hunters):
+        print(
+            "[EvalConfig] override env.num_hunters={} (max from fixed tasks; old={})".format(
+                int(required_eval_hunters),
+                int(merged_cfg.env.num_hunters),
+            )
+        )
+        merged_cfg.env.num_hunters = int(required_eval_hunters)
     _print_domain_randomization_settings(merged_cfg, eval_task_specs)
 
     envs = make_train_env(merged_cfg)
