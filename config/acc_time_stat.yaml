@@ -1,6 +1,6 @@
 exp:
   algorithm_name: rmappo
-  experiment_name: Test_noGIF_timeStat_acc
+  experiment_name: Test_rnd_BinMetric_timeStat_acc
   seed: 1
   cuda: true
   cuda_deterministic: true
@@ -8,11 +8,11 @@ exp:
   n_rollout_threads: 5
   n_eval_rollout_threads: 10
   n_render_rollout_threads: 1
-  num_env_steps: 2000000 # total environment steps to train
+  num_env_steps: 20000 # total environment steps to train
 
 # Environment settings (common)
 env:
-  env_name: hunter_only
+  env_name: hunter_only_TimeTest
   world_size: 100
   episode_length: 256 # max steps per episode
   dt: 0.1
@@ -37,12 +37,12 @@ env:
 
 Hunter:
   perception_radius: -1
-  max_velo: 20
+  max_velo: 10
   safe_dis: 15
   control_mode: acceleration  # Choices: ["acceleration", "velocity"]
-  max_acc: 8
+  max_acc: 5
   max_turn_angle: 10
-  min_turn_limit_velo: 5.0
+  min_turn_limit_velo: 3.0
 
 Explorer:
   perception_radius: -1
@@ -51,12 +51,12 @@ Explorer:
 
 Target: 
   perception_radius: -1
-  max_velo: 25
+  max_velo: 10
   safe_dis: 15
   control_mode: acceleration
-  max_acc: 10
+  max_acc: 5
   max_turn_angle: 20
-  min_turn_limit_velo: 5.0
+  min_turn_limit_velo: 3.0
 
 # UAV pursuit scenario settings
 reward:
@@ -125,15 +125,15 @@ schedule:
   use_linear_lr_decay: false
 
 logging:
-  log_gif: false         # 训练阶段是否按规则保存GIF
+  log_gif: true         # 训练阶段是否按规则保存GIF
 
 eval:
   fixed_tasks: []
-  fixed_tasks_file: config/eval_tasks/eval_enhance.yaml
+  fixed_tasks_file: config/eval_tasks/patrol_tasks_h8_n100.yaml
 
 domain_randomization:
   train_split:
-    enable: false
+    enable: true
     regen_interval_episode: 50
     regen_prob: 1.0
     hunter_count_choices: [1, 2, 3, 4, 5]
