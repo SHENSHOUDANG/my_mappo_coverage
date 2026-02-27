@@ -101,10 +101,18 @@ class RoleBasedRunner(object):
         self.gif_start_step = int(self.cfg.render.gif_start_step)
         # 训练阶段默认仅绘制第0个rollout环境，降低开销；评估仍绘制全部eval环境。
         self.train_gif_env_ids = [0]
+        self.pending_train_gif_once = False
         self.best_eval_metrics = {
             "reward": -np.inf,
             "capture_rate": -np.inf,
             "capture_steps": np.inf,
+        }
+        self.best_eval_metrics_by_bucket = {
+            "target_learn": {
+                "eval_reward": -np.inf,
+                "capture_rate": -np.inf,
+                "capture_steps": np.inf,
+            }
         }
         print(
             "[DomainRand] train.enable={}, interval={}, prob={}, hunter_choices={}, seed_range={}, target_policies={}, patrol_pool={}".format(
@@ -304,10 +312,19 @@ class RoleBasedRunner(object):
                     self.role_trainers[role_name].policy.lr_decay(episode, episodes)
 
             do_eval_this_episode = self.use_eval and episode % max(1, self.eval_interval) == 0
+            do_train_gif_this_episode = bool(self.pending_train_gif_once)
+            if do_train_gif_this_episode:
+                self.pending_train_gif_once = False
+                print(
+                    "[TrainGIF] episode {} save once (env ids: {})".format(
+                        int(episode),
+                        ",".join([str(int(x)) for x in self.train_gif_env_ids]),
+                    )
+                )
             if do_eval_this_episode:
-                print("[Train] episode {} trigger eval + gif saving".format(int(episode)))
+                print("[Train] episode {} trigger eval (first pass without GIF)".format(int(episode)))
             if hasattr(self.envs, "capture_terminal_frame"):
-                self.envs.capture_terminal_frame = bool(do_eval_this_episode)
+                self.envs.capture_terminal_frame = bool(do_train_gif_this_episode)
             train_frames = [[] for _ in range(self.n_rollout_threads)]
             train_gif_finished = np.zeros(self.n_rollout_threads, dtype=bool)
             train_capture_step = np.full(self.n_rollout_threads, -1, dtype=np.int32)
@@ -318,14 +335,12 @@ class RoleBasedRunner(object):
             last_infos = None
 
             for step in range(self.episode_length):
-                # 训练GIF采样：按每个训练环境独立采集，done后停止该环境采样。
-                # 注意 DummyVecEnv.step 会在done后自动reset，故必须在step前采样，避免跨episode拼接。
-                if do_eval_this_episode and step % self.gif_frame_interval == 0:
-                    # 仅渲染需要录制GIF的训练环境，避免不必要的全量渲染开销。
+                # 训练GIF采样：仅在被触发的单个episode中记录指定env（默认env0）。
+                if do_train_gif_this_episode and step % self.gif_frame_interval == 0:
                     for env_i in self.train_gif_env_ids:
-                        if env_i < 0 or env_i >= self.n_rollout_threads:        # 无效Env ID
+                        if env_i < 0 or env_i >= self.n_rollout_threads:
                             continue
-                        if train_gif_finished[env_i]:               # 已结束
+                        if train_gif_finished[env_i]:
                             continue
                         frame = self.envs.render(
                             mode="rgb_array",
@@ -358,9 +373,13 @@ class RoleBasedRunner(object):
                     episode_active_hunter_slots = int(active_cnt)
                 last_infos = infos
 
-                if do_eval_this_episode:        # 固定获取任务结束帧
-                    for env_i in range(self.n_rollout_threads):
-                        if not train_gif_finished[env_i] and bool(np.all(dones[env_i])):
+                if do_train_gif_this_episode:
+                    for env_i in self.train_gif_env_ids:
+                        if env_i < 0 or env_i >= self.n_rollout_threads:
+                            continue
+                        if train_gif_finished[env_i]:
+                            continue
+                        if bool(np.all(dones[env_i])):
                             env_infos = infos[env_i]
                             if any(bool(agent_info.get("captured", False)) for agent_info in env_infos):
                                 train_capture_step[env_i] = int(step + 1)
@@ -371,8 +390,8 @@ class RoleBasedRunner(object):
                             train_alive_rate[env_i] = (
                                 float(np.mean(hunter_alive_flags)) if len(hunter_alive_flags) > 0 else 0.0
                             )
-                            terminal_frame = self._extract_terminal_frame(infos[env_i])
-                            if terminal_frame is not None and env_i in self.train_gif_env_ids:
+                            terminal_frame = self._extract_terminal_frame(env_infos)
+                            if terminal_frame is not None:
                                 train_frames[env_i].append(terminal_frame.copy())
                             train_gif_finished[env_i] = True
 
@@ -450,8 +469,8 @@ class RoleBasedRunner(object):
                 )
                 self.log_train(train_infos, total_num_steps)
 
-            # eval + train gif
-            if do_eval_this_episode:
+            # save one-shot train gif (triggered by last eval improvement)
+            if do_train_gif_this_episode:
                 for env_i in self.train_gif_env_ids:
                     if env_i >= self.n_rollout_threads:
                         continue
@@ -464,13 +483,69 @@ class RoleBasedRunner(object):
                         alive_rate=float(train_alive_rate[env_i]),
                     )
                 print(
-                    "[GIF] saved train gifs for episode {} to {} ({} envs)".format(
+                    "[GIF] saved one-shot train gifs for episode {} to {} ({} envs)".format(
                         int(episode), self.gif_dir, int(len(self.train_gif_env_ids))
                     )
                 )
-                self.eval(total_num_steps, episode, eval_envs=self.eval_envs, bucket="fixed")
+
+            # eval（两阶段：先不渲染；仅在指标更新时重跑并保存GIF）
+            if do_eval_this_episode:
+                fixed_metrics = self.eval(
+                    total_num_steps,
+                    episode,
+                    eval_envs=self.eval_envs,
+                    bucket="fixed",
+                    save_gifs=False,
+                    record_logs=True,
+                )
+                fixed_updates = self._peek_fixed_metric_updates(fixed_metrics)
+
+                target_learn_metrics = None
+                target_learn_updates = []
                 if self.eval_envs_target_learn is not None:
-                    self.eval(total_num_steps, episode, eval_envs=self.eval_envs_target_learn, bucket="target_learn")
+                    target_learn_metrics = self.eval(
+                        total_num_steps,
+                        episode,
+                        eval_envs=self.eval_envs_target_learn,
+                        bucket="target_learn",
+                        save_gifs=False,
+                        record_logs=True,
+                    )
+                    target_learn_updates = self._peek_bucket_metric_updates("target_learn", target_learn_metrics)
+
+                should_rerun_for_gifs = (len(fixed_updates) > 0) or (len(target_learn_updates) > 0)
+                if should_rerun_for_gifs:
+                    self.pending_train_gif_once = True
+                    print(
+                        "[EvalRerun] episode {} updates detected (fixed={} | target_learn={}), rerun with GIF saving".format(
+                            int(episode),
+                            ",".join(fixed_updates) if len(fixed_updates) > 0 else "none",
+                            ",".join(target_learn_updates) if len(target_learn_updates) > 0 else "none",
+                        )
+                    )
+                    self.eval(
+                        total_num_steps,
+                        episode,
+                        eval_envs=self.eval_envs,
+                        bucket="fixed",
+                        save_gifs=True,
+                        record_logs=False,
+                    )
+                    if self.eval_envs_target_learn is not None:
+                        self.eval(
+                            total_num_steps,
+                            episode,
+                            eval_envs=self.eval_envs_target_learn,
+                            bucket="target_learn",
+                            save_gifs=True,
+                            record_logs=False,
+                        )
+                    if len(fixed_updates) > 0:
+                        self._maybe_save_best_models(episode, fixed_metrics)
+                    if len(target_learn_updates) > 0 and target_learn_metrics is not None:
+                        self._update_bucket_best_metrics("target_learn", target_learn_metrics)
+                else:
+                    print("[EvalRerun] episode {} no metric updates, skip GIF rerun".format(int(episode)))
             if hasattr(self.envs, "capture_terminal_frame"):
                 self.envs.capture_terminal_frame = False
 
@@ -691,14 +766,26 @@ class RoleBasedRunner(object):
             torch.save(trainer.policy.critic.state_dict(), os.path.join(self.save_dir, f"critic_{role}.pt"))
 
     @torch.no_grad()
-    def eval(self, total_num_steps, episode, eval_envs=None, bucket="fixed"):
+    def eval(
+        self,
+        total_num_steps,
+        episode,
+        eval_envs=None,
+        bucket="fixed",
+        save_gifs=False,
+        record_logs=True,
+    ):
         """
         功能:
             执行周期性evaluation（每个eval_env运行1个episode），
-            记录reward/捕获率/捕获步数，并保存每个eval_env的GIF。
+            记录reward/捕获率/捕获步数；仅在save_gifs=True时保存GIF。
         输入:
             total_num_steps (int): 当前累计环境步数。
             episode (int): 当前训练episode编号。
+            eval_envs (VecEnv | None): 评估环境；None时使用self.eval_envs。
+            bucket (str): 评估桶名称（fixed/target_learn等）。
+            save_gifs (bool): 是否保存GIF。
+            record_logs (bool): 是否写TB与CSV。
         输出:
             dict: evaluation指标字典。
         """
@@ -720,7 +807,7 @@ class RoleBasedRunner(object):
         act_dim = int(eval_envs.action_space[0].shape[0])
         print("[EvalStart] bucket={}, episode={}, total_steps={}, eval_envs={}".format(str(bucket), int(episode), int(total_num_steps), n_env))
         if hasattr(eval_envs, "capture_terminal_frame"):
-            eval_envs.capture_terminal_frame = True
+            eval_envs.capture_terminal_frame = bool(save_gifs)
 
         eval_rnn_states = {
             aid: np.zeros((n_env, self.recurrent_N, self.hidden_size), dtype=np.float32)
@@ -739,10 +826,11 @@ class RoleBasedRunner(object):
         eval_frames = [[] for _ in range(n_env)]
 
         # Step 2: 记录初始帧
-        frame_batch = eval_envs.render(mode="rgb_array", title=f"Eval({str(bucket)}) Episode {int(episode)}")
-        if isinstance(frame_batch, np.ndarray):
-            for env_i in range(min(n_env, frame_batch.shape[0])):
-                eval_frames[env_i].append(frame_batch[env_i].copy())
+        if save_gifs:
+            frame_batch = eval_envs.render(mode="rgb_array", title=f"Eval({str(bucket)}) Episode {int(episode)}")
+            if isinstance(frame_batch, np.ndarray):
+                for env_i in range(min(n_env, frame_batch.shape[0])):
+                    eval_frames[env_i].append(frame_batch[env_i].copy())
 
         # Step 3: rollout一个评估episode长度
         for eval_step in range(self.episode_length):
@@ -780,12 +868,13 @@ class RoleBasedRunner(object):
                         for agent_info in eval_infos[env_i][: self.num_hunters]
                     ]
                     env_alive_rate[env_i] = float(np.mean(hunter_alive_flags)) if len(hunter_alive_flags) > 0 else 0.0
-                    terminal_frame = self._extract_terminal_frame(eval_infos[env_i])
-                    if terminal_frame is not None:
-                        eval_frames[env_i].append(terminal_frame.copy())
+                    if save_gifs:
+                        terminal_frame = self._extract_terminal_frame(eval_infos[env_i])
+                        if terminal_frame is not None:
+                            eval_frames[env_i].append(terminal_frame.copy())
                     env_finished[env_i] = True
 
-            if (eval_step + 1) % self.gif_frame_interval == 0:
+            if save_gifs and (eval_step + 1) % self.gif_frame_interval == 0:
                 frame_batch = eval_envs.render(mode="rgb_array", title=f"Eval({str(bucket)}) Episode {int(episode)}")
                 if isinstance(frame_batch, np.ndarray):
                     for env_i in range(min(n_env, frame_batch.shape[0])):
@@ -830,51 +919,50 @@ class RoleBasedRunner(object):
             )
         )
 
-        # Step 5: 记录TB与CSV
-        self.writter.add_scalars(
-            f"eval/{str(bucket)}/eval_reward",
-            {f"eval/{str(bucket)}/eval_reward": eval_reward},
-            total_num_steps,
-        )
-        self.writter.add_scalars(
-            f"eval/{str(bucket)}/capture_rate",
-            {f"eval/{str(bucket)}/capture_rate": capture_rate},
-            total_num_steps,
-        )
-        self.writter.add_scalars(
-            f"eval/{str(bucket)}/capture_steps",
-            {f"eval/{str(bucket)}/capture_steps": capture_steps},
-            total_num_steps,
-        )
-
-        self._append_eval_csv(
-            episode=episode,
-            total_num_steps=total_num_steps,
-            bucket=bucket,
-            eval_reward=eval_reward,
-            capture_rate=capture_rate,
-            capture_steps=capture_steps,
-            captured_episodes=captured_episodes,
-            total_eval_episodes=total_eval_episodes,
-        )
-
-        # Step 6: 保存每个eval_env GIF
-        for env_i in range(n_env):
-            gif_path = Path(self.gif_dir) / f"e-{str(bucket)}-{int(episode)}-env-{int(env_i)}.gif"
-            self._save_gif(
-                eval_frames[env_i],
-                gif_path,
-                episode_id=int(episode),
-                capture_step=None if env_capture_step[env_i] <= 0 else int(env_capture_step[env_i]),
-                alive_rate=float(env_alive_rate[env_i]),
+        # Step 5: 记录TB与CSV（可选）
+        if record_logs:
+            self.writter.add_scalars(
+                f"eval/{str(bucket)}/eval_reward",
+                {f"eval/{str(bucket)}/eval_reward": eval_reward},
+                total_num_steps,
             )
-        print("[GIF] saved eval({}) gifs for episode {} to {} ({} envs)".format(str(bucket), int(episode), self.gif_dir, n_env))
+            self.writter.add_scalars(
+                f"eval/{str(bucket)}/capture_rate",
+                {f"eval/{str(bucket)}/capture_rate": capture_rate},
+                total_num_steps,
+            )
+            self.writter.add_scalars(
+                f"eval/{str(bucket)}/capture_steps",
+                {f"eval/{str(bucket)}/capture_steps": capture_steps},
+                total_num_steps,
+            )
+
+            self._append_eval_csv(
+                episode=episode,
+                total_num_steps=total_num_steps,
+                bucket=bucket,
+                eval_reward=eval_reward,
+                capture_rate=capture_rate,
+                capture_steps=capture_steps,
+                captured_episodes=captured_episodes,
+                total_eval_episodes=total_eval_episodes,
+            )
+
+        # Step 6: 保存每个eval_env GIF（可选）
+        if save_gifs:
+            for env_i in range(n_env):
+                gif_path = Path(self.gif_dir) / f"e-{str(bucket)}-{int(episode)}-env-{int(env_i)}.gif"
+                self._save_gif(
+                    eval_frames[env_i],
+                    gif_path,
+                    episode_id=int(episode),
+                    capture_step=None if env_capture_step[env_i] <= 0 else int(env_capture_step[env_i]),
+                    alive_rate=float(env_alive_rate[env_i]),
+                )
+            print("[GIF] saved eval({}) gifs for episode {} to {} ({} envs)".format(str(bucket), int(episode), self.gif_dir, n_env))
         if hasattr(eval_envs, "capture_terminal_frame"):
             eval_envs.capture_terminal_frame = False
 
-        # Step 7: 按指标保存最佳模型
-        if str(bucket) == "fixed":
-            self._maybe_save_best_models(episode, eval_metrics)
         return eval_metrics
 
     def _save_gif(self, frames, gif_path, episode_id=None, capture_step=None, alive_rate=None):
@@ -901,8 +989,8 @@ class RoleBasedRunner(object):
         header_text = self._build_gif_header_text(episode_id, capture_step, alive_rate)
         sampled_frames = [self._overlay_gif_header(frame, header_text) for frame in sampled_frames]
 
-        # Step 4: 终止帧额外停留0.8秒便于观察结束状态（依赖gif_frame_duration）。
-        hold_frames = max(1, int(round(2.0 / max(self.gif_frame_duration, 1e-6))))
+        # Step 4: 终止帧额外停留3.0秒便于观察结束状态（依赖gif_frame_duration）。
+        hold_frames = max(1, int(round(3.0 / max(self.gif_frame_duration, 1e-6))))
         sampled_frames.extend([sampled_frames[-1].copy() for _ in range(hold_frames)])
 
         # Step 5: 写出GIF
@@ -1182,6 +1270,88 @@ class RoleBasedRunner(object):
             return f"{m:02d}m{s:02d}s"
         return f"{s:02d}s"
 
+    def _peek_fixed_metric_updates(self, eval_metrics):
+        """
+        功能:
+            仅比较fixed桶当前指标与历史最优，不修改任何状态。
+        输入:
+            eval_metrics (dict): 当前fixed评估指标。
+        输出:
+            list[str]: 被刷新（更优）的指标名称列表。
+        """
+        updated_metrics = []
+        if float(eval_metrics["eval_reward"]) > float(self.best_eval_metrics["reward"]):
+            updated_metrics.append("reward")
+        if float(eval_metrics["capture_rate"]) > float(self.best_eval_metrics["capture_rate"]):
+            updated_metrics.append("capture_rate")
+        if float(eval_metrics["capture_steps"]) < float(self.best_eval_metrics["capture_steps"]):
+            updated_metrics.append("capture_steps")
+        return updated_metrics
+
+    def _peek_bucket_metric_updates(self, bucket, eval_metrics):
+        """
+        功能:
+            比较指定bucket当前指标与该bucket历史最优，不修改任何状态。
+        输入:
+            bucket (str): 指标桶名称。
+            eval_metrics (dict): 当前评估指标。
+        输出:
+            list[str]: 被刷新（更优）的指标名称列表。
+        """
+        if bucket not in self.best_eval_metrics_by_bucket:
+            self.best_eval_metrics_by_bucket[bucket] = {
+                "eval_reward": -np.inf,
+                "capture_rate": -np.inf,
+                "capture_steps": np.inf,
+            }
+        best = self.best_eval_metrics_by_bucket[bucket]
+        updated_metrics = []
+        if float(eval_metrics["eval_reward"]) > float(best["eval_reward"]):
+            updated_metrics.append("eval_reward")
+        if float(eval_metrics["capture_rate"]) > float(best["capture_rate"]):
+            updated_metrics.append("capture_rate")
+        if float(eval_metrics["capture_steps"]) < float(best["capture_steps"]):
+            updated_metrics.append("capture_steps")
+        return updated_metrics
+
+    def _update_bucket_best_metrics(self, bucket, eval_metrics):
+        """
+        功能:
+            更新指定bucket的历史最优指标，并打印更新摘要。
+        输入:
+            bucket (str): 指标桶名称。
+            eval_metrics (dict): 当前评估指标。
+        输出:
+            list[str]: 实际被更新的指标名称列表。
+        """
+        if bucket not in self.best_eval_metrics_by_bucket:
+            self.best_eval_metrics_by_bucket[bucket] = {
+                "eval_reward": -np.inf,
+                "capture_rate": -np.inf,
+                "capture_steps": np.inf,
+            }
+        best = self.best_eval_metrics_by_bucket[bucket]
+        updated_metrics = self._peek_bucket_metric_updates(bucket, eval_metrics)
+        if "eval_reward" in updated_metrics:
+            best["eval_reward"] = float(eval_metrics["eval_reward"])
+        if "capture_rate" in updated_metrics:
+            best["capture_rate"] = float(eval_metrics["capture_rate"])
+        if "capture_steps" in updated_metrics:
+            best["capture_steps"] = float(eval_metrics["capture_steps"])
+        print(
+            "[EvalSummary][{}] current: reward={:.4f}, capture_rate={:.4f}, capture_steps={:.2f} | best: reward={:.4f}, capture_rate={:.4f}, capture_steps={:.2f} | updated={}".format(
+                str(bucket),
+                float(eval_metrics["eval_reward"]),
+                float(eval_metrics["capture_rate"]),
+                float(eval_metrics["capture_steps"]),
+                float(best["eval_reward"]),
+                float(best["capture_rate"]),
+                float(best["capture_steps"]),
+                ",".join(updated_metrics) if len(updated_metrics) > 0 else "none",
+            )
+        )
+        return updated_metrics
+
     def _maybe_save_best_models(self, episode, eval_metrics):
         """
         功能:
@@ -1190,7 +1360,7 @@ class RoleBasedRunner(object):
             episode (int): 当前训练episode编号。
             eval_metrics (dict): 当前评估指标字典。
         输出:
-            无。
+            list[str]: 被更新的指标名称列表。
         """
         updated_metrics = []
         # Step 1: reward越大越好
@@ -1223,6 +1393,7 @@ class RoleBasedRunner(object):
                 ",".join(updated_metrics) if len(updated_metrics) > 0 else "none",
             )
         )
+        return updated_metrics
 
     def _save_best_snapshot(self, metric_name, episode, eval_metrics):
         """

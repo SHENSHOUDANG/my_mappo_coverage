@@ -6,7 +6,7 @@ exp:
   cuda_deterministic: true
   n_training_threads: 2
   n_rollout_threads: 5
-  n_eval_rollout_threads: 9
+  n_eval_rollout_threads: 10
   n_render_rollout_threads: 1
   num_env_steps: 2000000 # total environment steps to train
 
@@ -16,7 +16,7 @@ env:
   world_size: 100
   episode_length: 256 # max steps per episode
   dt: 0.1
-  num_hunters: 3
+  num_hunters: 5
   num_explorers: 0
   neighbor_N: 3
 
@@ -61,6 +61,7 @@ Target:
 # UAV pursuit scenario settings
 reward:
   # Collision Penalty
+  target_collision_penalty: 30.0
   collision_penalty_k: 20.0
   collision_penalty_cap: 200.0
   safe_zone_penalty_scale: 0.1
@@ -74,7 +75,6 @@ reward:
   # Capture reward
   hunter_capture_reward: 15.0
   target_captured_penalty: 12.0
-  target_collision_penalty: 30.0
 
   # Speed Penalty
   speed_penalty: 0.02
@@ -133,10 +133,10 @@ domain_randomization:
     enable: true
     regen_interval_episode: 50
     regen_prob: 1.0
-    hunter_count_choices: [1, 2, 3]
+    hunter_count_choices: [1, 2, 3, 4, 5]
     seed_range: [1, 99999]
-    target_policy_choices: ["learn"]
-    patrol_name_choices: ["square", "ring"]
+    target_policy_choices: ["learn", "patrol", "random"]
+    patrol_name_choices: ["all"]
 
 # Pretrained model
 pretrained:

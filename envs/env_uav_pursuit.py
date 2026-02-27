@@ -586,6 +586,8 @@ class UAVPursuitEnv(object):
         patrol_routes = self._load_patrol_routes(
             env_cfg.target_patrol_path, list(env_cfg.target_patrol_names)
         )
+        if len(self._last_loaded_patrol_route_names) > 0:
+            self.active_target_patrol_names = list(self._last_loaded_patrol_route_names)
         self.hunters = [
             HunterAgent(
                 i,
@@ -798,7 +800,11 @@ class UAVPursuitEnv(object):
         self.target.route_episode_count = 0
         self.target.patrol_index = 0
         self.patrol_routes = patrol_routes
-        self.active_target_patrol_names = list(target_patrol_names)
+        self.active_target_patrol_names = (
+            list(self._last_loaded_patrol_route_names)
+            if len(self._last_loaded_patrol_route_names) > 0
+            else list(target_patrol_names)
+        )
         self.target_route_id = 0
         if len(self.patrol_routes) > 0:
             self.target_route_id = int(np.clip(target_route_id, 0, len(self.patrol_routes) - 1))
@@ -1822,10 +1828,11 @@ class UAVPursuitEnv(object):
             从JSON加载巡逻路线并转换到环境全局坐标系。
         输入:
             route_path (str): 路线文件路径（绝对路径或项目相对路径）。
-            route_names (list[str]): 指定路线名；空列表表示加载全部。
+            route_names (list[str]): 指定路线名；空列表或包含\"all\"时加载全部。
         输出:
             list[list[np.ndarray]]: 每条路线由全局坐标航点组成。
         """
+        self._last_loaded_patrol_route_names = []
         if not route_path:
             return []
         path = route_path
@@ -1838,11 +1845,13 @@ class UAVPursuitEnv(object):
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        selected = set(route_names) if route_names else None
+        route_names_list = [str(x).strip() for x in (route_names or []) if str(x).strip()]
+        use_all_routes = (len(route_names_list) == 0) or any(n.lower() == "all" for n in route_names_list)
+        selected = None if use_all_routes else set(route_names_list)
         coord_mode = data.get("meta", {}).get("coords", "")
         routes = []
         for item in data.get("routes", []):
-            name = item.get("name")
+            name = str(item.get("name", ""))
             if selected is not None and name not in selected:
                 continue
             points = np.asarray(item.get("waypoints", []), dtype=np.float32)
@@ -1852,4 +1861,5 @@ class UAVPursuitEnv(object):
                 points = (points * 2.0 - 1.0) * self.world_size
             points = np.clip(points, -self.world_size, self.world_size).astype(np.float32)
             routes.append([p for p in points])
+            self._last_loaded_patrol_route_names.append(name)
         return routes
