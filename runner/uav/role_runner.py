@@ -314,6 +314,7 @@ class RoleBasedRunner(object):
             train_alive_rate = np.full(self.n_rollout_threads, 0.0, dtype=np.float32)
             episode_hunter_reward = 0.0
             episode_target_reward = 0.0
+            episode_active_hunter_slots = None
             last_infos = None
 
             for step in range(self.episode_length):
@@ -348,6 +349,13 @@ class RoleBasedRunner(object):
                 obs, rewards, dones, infos = self.envs.step(actions_env)
                 episode_hunter_reward += float(np.sum(rewards[:, : self.num_hunters, 0]))
                 episode_target_reward += float(np.sum(rewards[:, self.target_index, 0]))
+                if episode_active_hunter_slots is None:
+                    active_cnt = 0
+                    for env_infos in infos:
+                        for hid in range(self.num_hunters):
+                            if hid < len(env_infos) and bool(env_infos[hid].get("active_agent", True)):
+                                active_cnt += 1
+                    episode_active_hunter_slots = int(active_cnt)
                 last_infos = infos
 
                 if do_eval_this_episode:        # 固定获取任务结束帧
@@ -390,13 +398,18 @@ class RoleBasedRunner(object):
             # post process
             total_num_steps = (episode + 1) * self.episode_length * self.n_rollout_threads
             hunter_alive_mean, target_alive_mean = self._extract_alive_stats(last_infos)
+            hunter_reward_denominator = (
+                episode_active_hunter_slots
+                if episode_active_hunter_slots is not None
+                else self.n_rollout_threads * self.num_hunters
+            )
             self._append_log_csv(
                 episode=episode,
                 total_num_steps=total_num_steps,
                 hunter_alive_mean=hunter_alive_mean,
                 target_alive_mean=target_alive_mean,
                 hunter_reward_mean=episode_hunter_reward
-                / max(1, self.n_rollout_threads * self.num_hunters),
+                / max(1, hunter_reward_denominator),
                 target_reward_mean=episode_target_reward / max(1, self.n_rollout_threads),
             )
 
@@ -429,7 +442,7 @@ class RoleBasedRunner(object):
                         100.0 * progress,
                         self._format_duration(elapsed),
                         self._format_duration(eta_sec),
-                        episode_hunter_reward / max(1, self.n_rollout_threads * self.num_hunters),
+                        episode_hunter_reward / max(1, hunter_reward_denominator),
                         episode_target_reward / max(1, self.n_rollout_threads),
                         hunter_alive_mean,
                         target_alive_mean,

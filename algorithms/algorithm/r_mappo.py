@@ -121,6 +121,17 @@ class RMAPPO():
         return_batch = check(return_batch).to(**self.tpdv)
         active_masks_batch = check(active_masks_batch).to(**self.tpdv)
 
+        # Step 0: 全inactive样本保护（先告警，再跳过，避免active_masks求和为0导致NaN）
+        active_mask_sum = float(active_masks_batch.sum().item())
+        if active_mask_sum <= 1e-8:
+            print(
+                "\n[WARNING][MAPPO] active_masks sum is zero in current mini-batch. "
+                "Skip PPO update for this batch to avoid NaN.\n"
+            )
+            zero_scalar = torch.zeros(1, **self.tpdv)
+            imp_weights = torch.ones(1, **self.tpdv)
+            return zero_scalar, 0.0, zero_scalar, zero_scalar, 0.0, imp_weights
+
         # Reshape to do in a single forward pass for all steps
         values, action_log_probs, dist_entropy = self.policy.evaluate_actions(share_obs_batch,
                                                                               obs_batch,
@@ -187,8 +198,16 @@ class RMAPPO():
             advantages = buffer.returns[:-1] - buffer.value_preds[:-1]
         advantages_copy = advantages.copy()
         advantages_copy[buffer.active_masks[:-1] == 0.0] = np.nan
-        mean_advantages = np.nanmean(advantages_copy)
-        std_advantages = np.nanstd(advantages_copy)
+        if np.all(np.isnan(advantages_copy)):
+            print(
+                "\n[WARNING][MAPPO] all advantages are masked (active_masks==0). "
+                "Use zero-mean/unit-std fallback for normalization.\n"
+            )
+            mean_advantages = 0.0
+            std_advantages = 1.0
+        else:
+            mean_advantages = np.nanmean(advantages_copy)
+            std_advantages = np.nanstd(advantages_copy)
         advantages = (advantages - mean_advantages) / (std_advantages + 1e-5)
 
         train_info = {}
@@ -200,6 +219,7 @@ class RMAPPO():
         train_info['critic_grad_norm'] = 0
         train_info['ratio'] = 0
 
+        num_updates = 0
         for _ in range(self.ppo_epoch):
             if self._use_recurrent_policy:
                 data_generator = buffer.recurrent_generator(advantages, self.num_mini_batch, self.data_chunk_length)
@@ -211,15 +231,16 @@ class RMAPPO():
             for sample in data_generator:
                 value_loss, critic_grad_norm, policy_loss, dist_entropy, actor_grad_norm, imp_weights \
                     = self.ppo_update(sample, update_actor)
+                num_updates += 1
 
                 train_info['value_loss'] += value_loss.item()
                 train_info['policy_loss'] += policy_loss.item()
                 train_info['dist_entropy'] += dist_entropy.item()
-                train_info['actor_grad_norm'] += actor_grad_norm
-                train_info['critic_grad_norm'] += critic_grad_norm
-                train_info['ratio'] += imp_weights.mean()
+                train_info['actor_grad_norm'] += float(actor_grad_norm)
+                train_info['critic_grad_norm'] += float(critic_grad_norm)
+                train_info['ratio'] += imp_weights.mean().item()
 
-        num_updates = self.ppo_epoch * self.num_mini_batch
+        num_updates = max(1, int(num_updates))
 
         for k in train_info.keys():
             train_info[k] /= num_updates
@@ -233,4 +254,3 @@ class RMAPPO():
     def prep_rollout(self):
         self.policy.actor.eval()
         self.policy.critic.eval()
-
