@@ -1,0 +1,146 @@
+exp:
+  algorithm_name: rmappo
+  experiment_name: Test_noGIF_timeStat_acc
+  seed: 1
+  cuda: true
+  cuda_deterministic: true
+  n_training_threads: 2
+  n_rollout_threads: 5
+  n_eval_rollout_threads: 10
+  n_render_rollout_threads: 1
+  num_env_steps: 2000000 # total environment steps to train
+
+# Environment settings (common)
+env:
+  env_name: hunter_only
+  world_size: 100
+  episode_length: 256 # max steps per episode
+  dt: 0.1
+  num_hunters: 5
+  num_explorers: 0
+  neighbor_N: 3
+
+  capture_dis: 20
+  capture_step: 10
+
+  collision_dis: 3
+  
+  target_pos_init_guidance_step: 10
+  target_pos_guidance: true
+  noisy_target_pos_std: 2  # max error percent
+  noisy_target_vel_std: 10  # 
+
+  target_policy_source: learn # Choices: ["learn", "patrol", "Random"]
+  target_patrol_path: datasets/patrol_routes.json
+  target_patrol_names: ["square", "ring"]
+  target_switch_interval: 10
+
+Hunter:
+  perception_radius: -1
+  max_velo: 20
+  safe_dis: 15
+  control_mode: acceleration  # Choices: ["acceleration", "velocity"]
+  max_acc: 8
+  max_turn_angle: 10
+  min_turn_limit_velo: 5.0
+
+Explorer:
+  perception_radius: -1
+  max_velo: 10
+  safe_dis: 15
+
+Target: 
+  perception_radius: -1
+  max_velo: 25
+  safe_dis: 15
+  control_mode: acceleration
+  max_acc: 10
+  max_turn_angle: 20
+  min_turn_limit_velo: 5.0
+
+# UAV pursuit scenario settings
+reward:
+  # Collision Penalty
+  target_collision_penalty: 30.0
+  collision_penalty_k: 20.0
+  collision_penalty_cap: 200.0
+  safe_zone_penalty_scale: 0.1
+  
+  # Base chase reward
+  base_far_scale: 0.2
+  base_near_scale: 1.0
+  base_streak_scale: 0.1
+  base_streak_cap: 30
+
+  # Capture reward
+  hunter_capture_reward: 15.0
+  target_captured_penalty: 12.0
+
+  # Speed Penalty
+  speed_penalty: 0.02
+  
+  # Explorer Penalty
+  lost_target_penalty: 0.1
+  lost_target_penalty_age_scale: 0.02
+
+
+# Model/network settings
+model:
+  policy_share: true # whether all agents share the same policy
+  use_centralized_V: true # centralized value function
+  hidden_size: 64
+  layer_N: 1
+  use_naive_recurrent_policy: false
+  use_recurrent_policy: true
+  data_chunk_length: 10
+
+# Optimizer settings
+optim:
+  lr: 0.0005
+  critic_lr: 0.0005
+  opti_eps: 0.00001
+  weight_decay: 0
+
+# PPO settings
+ppo:
+  ppo_epoch: 15
+  use_clipped_value_loss: true
+  clip_param: 0.2
+  num_mini_batch: 1
+  entropy_coef: 0.01
+  value_loss_coef: 1
+  use_max_grad_norm: true
+  max_grad_norm: 10.0
+  use_gae: true
+  gamma: 0.99
+  gae_lambda: 0.95
+  use_proper_time_limits: false
+  use_huber_loss: true
+  use_value_active_masks: true
+  use_policy_active_masks: true
+  huber_delta: 10.0
+
+# Learning rate schedule
+schedule:
+  use_linear_lr_decay: false
+
+logging:
+  log_gif: false         # 训练阶段是否按规则保存GIF
+
+eval:
+  fixed_tasks: []
+  fixed_tasks_file: config/eval_tasks/eval_enhance.yaml
+
+domain_randomization:
+  train_split:
+    enable: false
+    regen_interval_episode: 50
+    regen_prob: 1.0
+    hunter_count_choices: [1, 2, 3, 4, 5]
+    seed_range: [1, 99999]
+    target_policy_choices: ["learn", "patrol", "random"]
+    patrol_name_choices: ["all"]
+
+# Pretrained model
+pretrained:
+  model_dir: null

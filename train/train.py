@@ -231,6 +231,11 @@ parser.add_argument(
     action="store_true",
     help="Use GPU or not (CLI flag has higher priority than yaml false)",
 )
+parser.add_argument(
+    "--time_stat",
+    action="store_true",
+    help="Enable detailed per-episode runtime statistics and run runner.run_time_stat()",
+)
 
 
 def main(args):
@@ -323,13 +328,17 @@ def main(args):
         "device": device,
         "run_dir": run_dir,
         "num_agents": num_agents,
+        "time_stat": bool(args.time_stat),
     }
 
     # Step 7: 使用Multi-UAV专用Runner（分层配置 + 角色共享策略）
     from runner.uav.role_runner import RoleBasedRunner as Runner
 
     runner = Runner(runner_cfg, merged_cfg)
-    runner.run()
+    if bool(args.time_stat):
+        runner.run_time_stat()
+    else:
+        runner.run()
 
     # Step 8: 收尾
     envs.close()

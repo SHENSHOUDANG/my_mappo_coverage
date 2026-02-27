@@ -564,6 +564,282 @@ class RoleBasedRunner(object):
         # Step 4: 训练完成后，重载所有最优模型并强制评估+保存GIF
         self._final_eval_saved_best_models(total_num_steps=int(self.num_env_steps), episode=int(episodes - 1))
 
+    def run_time_stat(self):
+        """
+        功能:
+            以低侵入方式统计训练耗时瓶颈，并复用run()原始流程执行训练。
+        输入:
+            无。
+        输出:
+            无（打印并写出每个episode的耗时统计到time_stat.csv）。
+        """
+        # Step 1: 初始化统计上下文与CSV
+        self._init_time_stat_context()
+        print("[TimeStat] enabled, running instrumented training via run()")
+
+        # Step 2: 保存原始方法引用
+        orig_collect = self.collect
+        orig_env_step = self.envs.step
+        orig_insert = self.insert
+        orig_compute = self.compute
+        orig_train = self.train
+        orig_eval = self.eval
+        orig_save_gif = self._save_gif
+        orig_final_eval = self._final_eval_saved_best_models
+
+        def _wrapped_collect(step):
+            if int(step) == 0:
+                self._start_time_stat_episode()
+            if self._time_stat_ctx["current"] is not None:
+                self._time_stat_ctx["current"]["step_clock_start"] = time.perf_counter()
+            t0 = time.perf_counter()
+            out = orig_collect(step)
+            dt = time.perf_counter() - t0
+            self._accumulate_time_stat("collect", dt)
+            return out
+
+        def _wrapped_env_step(actions_env):
+            t0 = time.perf_counter()
+            out = orig_env_step(actions_env)
+            dt = time.perf_counter() - t0
+            self._accumulate_time_stat("env_step", dt)
+            return out
+
+        def _wrapped_insert(data):
+            t0 = time.perf_counter()
+            out = orig_insert(data)
+            dt = time.perf_counter() - t0
+            self._accumulate_time_stat("insert", dt)
+            current = self._time_stat_ctx["current"]
+            if current is not None and current["step_clock_start"] is not None:
+                step_dt = time.perf_counter() - float(current["step_clock_start"])
+                current["step_total_sec"] += float(step_dt)
+                current["step_calls"] += 1
+                current["step_clock_start"] = None
+            return out
+
+        def _wrapped_compute():
+            t0 = time.perf_counter()
+            out = orig_compute()
+            dt = time.perf_counter() - t0
+            self._accumulate_time_stat("compute", dt, with_calls=False)
+            return out
+
+        def _wrapped_train():
+            t0 = time.perf_counter()
+            out = orig_train()
+            dt = time.perf_counter() - t0
+            self._accumulate_time_stat("train", dt, with_calls=False)
+            return out
+
+        def _wrapped_eval(*args, **kwargs):
+            t0 = time.perf_counter()
+            out = orig_eval(*args, **kwargs)
+            dt = time.perf_counter() - t0
+            self._accumulate_time_stat("eval", dt)
+            return out
+
+        def _wrapped_save_gif(*args, **kwargs):
+            t0 = time.perf_counter()
+            out = orig_save_gif(*args, **kwargs)
+            dt = time.perf_counter() - t0
+            self._accumulate_time_stat("save_gif", dt)
+            return out
+
+        def _wrapped_final_eval(*args, **kwargs):
+            self._finalize_time_stat_episode()
+            return orig_final_eval(*args, **kwargs)
+
+        # Step 3: 注入包装方法并执行原run
+        try:
+            self.collect = _wrapped_collect
+            self.envs.step = _wrapped_env_step
+            self.insert = _wrapped_insert
+            self.compute = _wrapped_compute
+            self.train = _wrapped_train
+            self.eval = _wrapped_eval
+            self._save_gif = _wrapped_save_gif
+            self._final_eval_saved_best_models = _wrapped_final_eval
+            self.run()
+        finally:
+            # Step 4: 恢复原始方法，避免后续调用污染
+            self.collect = orig_collect
+            self.envs.step = orig_env_step
+            self.insert = orig_insert
+            self.compute = orig_compute
+            self.train = orig_train
+            self.eval = orig_eval
+            self._save_gif = orig_save_gif
+            self._final_eval_saved_best_models = orig_final_eval
+            self._finalize_time_stat_episode()
+            self._time_stat_ctx = None
+
+    def _init_time_stat_context(self):
+        """
+        功能:
+            初始化time_stat上下文与CSV文件表头。
+        输入:
+            无。
+        输出:
+            无。
+        """
+        csv_path = Path(self.run_dir) / "time_stat.csv"
+        self._time_stat_ctx = {
+            "csv_path": csv_path,
+            "episode_idx": -1,
+            "current": None,
+        }
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "episode",
+                    "episode_total_sec",
+                    "step_calls",
+                    "step_avg_sec",
+                    "collect_calls",
+                    "collect_total_sec",
+                    "collect_avg_sec",
+                    "env_step_calls",
+                    "env_step_total_sec",
+                    "env_step_avg_sec",
+                    "insert_calls",
+                    "insert_total_sec",
+                    "insert_avg_sec",
+                    "compute_total_sec",
+                    "train_total_sec",
+                    "eval_calls",
+                    "eval_total_sec",
+                    "eval_avg_sec",
+                    "save_gif_calls",
+                    "save_gif_total_sec",
+                    "save_gif_avg_sec",
+                ]
+            )
+
+    def _start_time_stat_episode(self):
+        """
+        功能:
+            在新episode开始时切换统计窗口（并先结算上一episode）。
+        输入:
+            无。
+        输出:
+            无。
+        """
+        self._finalize_time_stat_episode()
+        self._time_stat_ctx["episode_idx"] += 1
+        self._time_stat_ctx["current"] = {
+            "episode": int(self._time_stat_ctx["episode_idx"]),
+            "episode_clock_start": time.perf_counter(),
+            "step_clock_start": None,
+            "step_total_sec": 0.0,
+            "step_calls": 0,
+            "collect_total_sec": 0.0,
+            "collect_calls": 0,
+            "env_step_total_sec": 0.0,
+            "env_step_calls": 0,
+            "insert_total_sec": 0.0,
+            "insert_calls": 0,
+            "compute_total_sec": 0.0,
+            "train_total_sec": 0.0,
+            "eval_total_sec": 0.0,
+            "eval_calls": 0,
+            "save_gif_total_sec": 0.0,
+            "save_gif_calls": 0,
+        }
+
+    def _accumulate_time_stat(self, key, dt, with_calls=True):
+        """
+        功能:
+            将单次计时累加到当前episode统计项。
+        输入:
+            key (str): 统计项前缀（collect/env_step/insert/eval/save_gif/compute/train）。
+            dt (float): 本次耗时（秒）。
+            with_calls (bool): 是否累计调用次数计数器。
+        输出:
+            无。
+        """
+        if self._time_stat_ctx is None:
+            return
+        current = self._time_stat_ctx.get("current", None)
+        if current is None:
+            return
+        total_key = f"{key}_total_sec"
+        call_key = f"{key}_calls"
+        if total_key in current:
+            current[total_key] += float(dt)
+        if with_calls and call_key in current:
+            current[call_key] += 1
+
+    def _finalize_time_stat_episode(self):
+        """
+        功能:
+            结束并输出当前episode的耗时统计（打印+CSV）。
+        输入:
+            无。
+        输出:
+            无。
+        """
+        if self._time_stat_ctx is None:
+            return
+        current = self._time_stat_ctx.get("current", None)
+        if current is None:
+            return
+
+        episode_total_sec = time.perf_counter() - float(current["episode_clock_start"])
+        step_avg = float(current["step_total_sec"]) / max(1, int(current["step_calls"]))
+        collect_avg = float(current["collect_total_sec"]) / max(1, int(current["collect_calls"]))
+        env_step_avg = float(current["env_step_total_sec"]) / max(1, int(current["env_step_calls"]))
+        insert_avg = float(current["insert_total_sec"]) / max(1, int(current["insert_calls"]))
+        eval_avg = float(current["eval_total_sec"]) / max(1, int(current["eval_calls"]))
+        save_gif_avg = float(current["save_gif_total_sec"]) / max(1, int(current["save_gif_calls"]))
+
+        print(
+            "[TimeStat][Ep {}] ep={:.3f}s | step(avg)={:.4f}s | collect(avg)={:.4f}s | env.step(avg)={:.4f}s | insert(avg)={:.4f}s | compute={:.3f}s | train={:.3f}s | eval(avg)={:.3f}s x{} | save_gif(avg)={:.3f}s x{}".format(
+                int(current["episode"]),
+                float(episode_total_sec),
+                float(step_avg),
+                float(collect_avg),
+                float(env_step_avg),
+                float(insert_avg),
+                float(current["compute_total_sec"]),
+                float(current["train_total_sec"]),
+                float(eval_avg),
+                int(current["eval_calls"]),
+                float(save_gif_avg),
+                int(current["save_gif_calls"]),
+            )
+        )
+
+        with open(self._time_stat_ctx["csv_path"], "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    int(current["episode"]),
+                    float(episode_total_sec),
+                    int(current["step_calls"]),
+                    float(step_avg),
+                    int(current["collect_calls"]),
+                    float(current["collect_total_sec"]),
+                    float(collect_avg),
+                    int(current["env_step_calls"]),
+                    float(current["env_step_total_sec"]),
+                    float(env_step_avg),
+                    int(current["insert_calls"]),
+                    float(current["insert_total_sec"]),
+                    float(insert_avg),
+                    float(current["compute_total_sec"]),
+                    float(current["train_total_sec"]),
+                    int(current["eval_calls"]),
+                    float(current["eval_total_sec"]),
+                    float(eval_avg),
+                    int(current["save_gif_calls"]),
+                    float(current["save_gif_total_sec"]),
+                    float(save_gif_avg),
+                ]
+            )
+        self._time_stat_ctx["current"] = None
+
     def warmup(self):
         """
         功能:
