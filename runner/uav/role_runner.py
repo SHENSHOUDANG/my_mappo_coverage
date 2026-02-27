@@ -95,9 +95,13 @@ class RoleBasedRunner(object):
 
         self.log_csv_path = str(self.run_dir / "log.csv")
         self.eval_csv_path = str(self.run_dir / "eval.csv")
-        self._init_csv_files()
+        self.init_csv_files = bool(runner_cfg.get("init_csv", True))
+        if self.init_csv_files:
+            self._init_csv_files()
         self.gif_frame_interval = max(1, int(self.cfg.logging.gif_frame_interval))
         self.gif_frame_duration = float(self.cfg.logging.gif_frame_duration)
+        self.log_gif = bool(getattr(self.cfg.logging, "log_gif", True))
+        self.time_stat = bool(runner_cfg.get("time_stat", False))
         self.gif_start_step = int(self.cfg.render.gif_start_step)
         # 训练阶段默认仅绘制第0个rollout环境，降低开销；评估仍绘制全部eval环境。
         self.train_gif_env_ids = [0]
@@ -131,6 +135,7 @@ class RoleBasedRunner(object):
                 int(len(self.cfg.eval.fixed_tasks)),
             )
         )
+        print("[GIFConfig] log_gif(train_stage)={}".format(bool(self.log_gif)))
 
         # Step 4: 仅在算法组件初始化时构建flat args
         self.flat_args = self._build_flat_args_for_algorithm()
@@ -312,7 +317,7 @@ class RoleBasedRunner(object):
                     self.role_trainers[role_name].policy.lr_decay(episode, episodes)
 
             do_eval_this_episode = self.use_eval and episode % max(1, self.eval_interval) == 0
-            do_train_gif_this_episode = bool(self.pending_train_gif_once)
+            do_train_gif_this_episode = bool(self.pending_train_gif_once) and bool(self.log_gif)
             if do_train_gif_this_episode:
                 self.pending_train_gif_once = False
                 print(
@@ -515,30 +520,37 @@ class RoleBasedRunner(object):
 
                 should_rerun_for_gifs = (len(fixed_updates) > 0) or (len(target_learn_updates) > 0)
                 if should_rerun_for_gifs:
-                    self.pending_train_gif_once = True
-                    print(
-                        "[EvalRerun] episode {} updates detected (fixed={} | target_learn={}), rerun with GIF saving".format(
-                            int(episode),
-                            ",".join(fixed_updates) if len(fixed_updates) > 0 else "none",
-                            ",".join(target_learn_updates) if len(target_learn_updates) > 0 else "none",
+                    if self.log_gif:
+                        self.pending_train_gif_once = True
+                        print(
+                            "[EvalRerun] episode {} updates detected (fixed={} | target_learn={}), rerun with GIF saving".format(
+                                int(episode),
+                                ",".join(fixed_updates) if len(fixed_updates) > 0 else "none",
+                                ",".join(target_learn_updates) if len(target_learn_updates) > 0 else "none",
+                            )
                         )
-                    )
-                    self.eval(
-                        total_num_steps,
-                        episode,
-                        eval_envs=self.eval_envs,
-                        bucket="fixed",
-                        save_gifs=True,
-                        record_logs=False,
-                    )
-                    if self.eval_envs_target_learn is not None:
                         self.eval(
                             total_num_steps,
                             episode,
-                            eval_envs=self.eval_envs_target_learn,
-                            bucket="target_learn",
+                            eval_envs=self.eval_envs,
+                            bucket="fixed",
                             save_gifs=True,
                             record_logs=False,
+                        )
+                        if self.eval_envs_target_learn is not None:
+                            self.eval(
+                                total_num_steps,
+                                episode,
+                                eval_envs=self.eval_envs_target_learn,
+                                bucket="target_learn",
+                                save_gifs=True,
+                                record_logs=False,
+                            )
+                    else:
+                        print(
+                            "[EvalRerun] episode {} updates detected but logging.log_gif=false, skip training-stage GIF rerun".format(
+                                int(episode)
+                            )
                         )
                     if len(fixed_updates) > 0:
                         self._maybe_save_best_models(episode, fixed_metrics)
@@ -548,6 +560,9 @@ class RoleBasedRunner(object):
                     print("[EvalRerun] episode {} no metric updates, skip GIF rerun".format(int(episode)))
             if hasattr(self.envs, "capture_terminal_frame"):
                 self.envs.capture_terminal_frame = False
+
+        # Step 4: 训练完成后，重载所有最优模型并强制评估+保存GIF
+        self._final_eval_saved_best_models(total_num_steps=int(self.num_env_steps), episode=int(episodes - 1))
 
     def warmup(self):
         """
@@ -774,6 +789,7 @@ class RoleBasedRunner(object):
         bucket="fixed",
         save_gifs=False,
         record_logs=True,
+        gif_output_dir=None,
     ):
         """
         功能:
@@ -786,6 +802,7 @@ class RoleBasedRunner(object):
             bucket (str): 评估桶名称（fixed/target_learn等）。
             save_gifs (bool): 是否保存GIF。
             record_logs (bool): 是否写TB与CSV。
+            gif_output_dir (str | Path | None): GIF输出目录，None时使用self.gif_dir。
         输出:
             dict: evaluation指标字典。
         """
@@ -950,8 +967,10 @@ class RoleBasedRunner(object):
 
         # Step 6: 保存每个eval_env GIF（可选）
         if save_gifs:
+            out_dir = Path(self.gif_dir) if gif_output_dir is None else Path(gif_output_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
             for env_i in range(n_env):
-                gif_path = Path(self.gif_dir) / f"e-{str(bucket)}-{int(episode)}-env-{int(env_i)}.gif"
+                gif_path = out_dir / f"e-{str(bucket)}-{int(episode)}-env-{int(env_i)}.gif"
                 self._save_gif(
                     eval_frames[env_i],
                     gif_path,
@@ -959,7 +978,7 @@ class RoleBasedRunner(object):
                     capture_step=None if env_capture_step[env_i] <= 0 else int(env_capture_step[env_i]),
                     alive_rate=float(env_alive_rate[env_i]),
                 )
-            print("[GIF] saved eval({}) gifs for episode {} to {} ({} envs)".format(str(bucket), int(episode), self.gif_dir, n_env))
+            print("[GIF] saved eval({}) gifs for episode {} to {} ({} envs)".format(str(bucket), int(episode), str(out_dir), n_env))
         if hasattr(eval_envs, "capture_terminal_frame"):
             eval_envs.capture_terminal_frame = False
 
@@ -1446,3 +1465,97 @@ class RoleBasedRunner(object):
                 str(metric_dir),
             )
         )
+
+    def _load_models_from_dir(self, model_dir):
+        """
+        功能:
+            从指定目录加载各角色actor/critic参数到当前runner。
+        输入:
+            model_dir (str | Path): 模型目录，包含actor_{role}.pt与critic_{role}.pt。
+        输出:
+            bool: True表示全部角色模型加载成功；False表示存在缺失文件。
+        """
+        # Step 1: 统一目录对象并逐角色检查文件存在性
+        load_dir = Path(model_dir)
+        for role in self.role_trainers.keys():
+            actor_path = load_dir / f"actor_{role}.pt"
+            critic_path = load_dir / f"critic_{role}.pt"
+            if (not actor_path.exists()) or (not critic_path.exists()):
+                print(
+                    "[FinalEval] skip {} due to missing model files for role={} (actor_exists={}, critic_exists={})".format(
+                        str(load_dir),
+                        str(role),
+                        bool(actor_path.exists()),
+                        bool(critic_path.exists()),
+                    )
+                )
+                return False
+
+        # Step 2: 逐角色加载权重并切换到eval模式
+        for role, trainer in self.role_trainers.items():
+            actor_state = torch.load(str(load_dir / f"actor_{role}.pt"), map_location=self.device)
+            critic_state = torch.load(str(load_dir / f"critic_{role}.pt"), map_location=self.device)
+            trainer.policy.actor.load_state_dict(actor_state)
+            trainer.policy.critic.load_state_dict(critic_state)
+            trainer.prep_rollout()
+        return True
+
+    @torch.no_grad()
+    def _final_eval_saved_best_models(self, total_num_steps, episode, model_glob=None):
+        """
+        功能:
+            训练完成后重载models下可用模型目录，分别在fixed/target_learn上评估并强制保存GIF到各自res目录。
+        输入:
+            total_num_steps (int): 评估记录使用的总步数。
+            episode (int): 训练完成时的episode编号。
+            model_glob (str | None): 仅评估匹配该glob的模型目录（相对models目录）。
+        输出:
+            无。
+        """
+        # Step 1: 收集待评估模型目录（优先包含models根目录，再包含best_eval_*目录）
+        candidate_dirs = []
+        root_model_dir = Path(self.save_dir)
+        if root_model_dir.exists() and (model_glob is None):
+            candidate_dirs.append(root_model_dir)
+        glob_pattern = "best_eval_*" if model_glob is None else str(model_glob)
+        candidate_dirs.extend(sorted(Path(self.best_dir).glob(glob_pattern)))
+
+        model_dirs = []
+        for model_dir in candidate_dirs:
+            if self._load_models_from_dir(model_dir):
+                model_dirs.append(model_dir)
+
+        if len(model_dirs) == 0:
+            print("[FinalEval] no valid model directories found under {}".format(self.best_dir))
+            return
+
+        print("[FinalEval] start evaluating {} model directories".format(len(model_dirs)))
+
+        # Step 2: 逐目录加载模型并在fixed/target_learn上评估，GIF输出到目录/res
+        for model_dir in model_dirs:
+            self._load_models_from_dir(model_dir)
+            res_dir = Path(model_dir) / "res"
+            res_dir.mkdir(parents=True, exist_ok=True)
+            for old_gif in res_dir.glob("e-*-env-*.gif"):
+                old_gif.unlink(missing_ok=True)
+
+            self.eval(
+                total_num_steps=total_num_steps,
+                episode=episode,
+                eval_envs=self.eval_envs,
+                bucket="fixed",
+                save_gifs=True,
+                record_logs=False,
+                gif_output_dir=res_dir,
+            )
+            if self.eval_envs_target_learn is not None:
+                self.eval(
+                    total_num_steps=total_num_steps,
+                    episode=episode,
+                    eval_envs=self.eval_envs_target_learn,
+                    bucket="target_learn",
+                    save_gifs=True,
+                    record_logs=False,
+                    gif_output_dir=res_dir,
+                )
+            print("[FinalEval] finished {} -> {}".format(str(model_dir), str(res_dir)))
