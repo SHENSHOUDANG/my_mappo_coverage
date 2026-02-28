@@ -48,7 +48,7 @@ class MultiUAVInferenceEnv(object):
         self.dt = float(env_cfg.dt)
         self.max_steps = int(env_cfg.max_steps)
 
-        self.num_hunters = int(env_cfg.num_hunters)
+        self.num_hunters = int(env_cfg.max_hunters_num)
         self.num_explorers = int(env_cfg.num_explorers)
         self.num_targets = int(env_cfg.num_targets)
         self.assignment_hunters_per_target = int(max(1, int(env_cfg.assignment_hunters_per_target)))

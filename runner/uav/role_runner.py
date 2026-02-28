@@ -62,11 +62,18 @@ class RoleBasedRunner(object):
         self.num_agents = int(runner_cfg["num_agents"])
 
         # Step 2: 读取训练主参数
-        self.num_hunters = int(self.cfg.env.num_hunters)
+        self.train_max_hunters_num = int(
+            runner_cfg.get("train_max_hunters_num", int(self.cfg.env.max_hunters_num))
+        )
+        self.eval_max_hunters_num = int(
+            runner_cfg.get("eval_max_hunters_num", self.train_max_hunters_num)
+        )
         self.target_index = self.num_agents - 1
         self.target_trainable = str(self.cfg.env.target_policy_source).lower() == "learn"
 
         self.episode_length = int(self.cfg.env.episode_length)
+        self.eval_episode_length = int(self.cfg.eval.eval_episode_length)
+        
         self.n_rollout_threads = int(self.cfg.exp.n_rollout_threads)
         self.n_eval_rollout_threads = int(self.cfg.exp.n_eval_rollout_threads)
         self.num_env_steps = int(self.cfg.exp.num_env_steps)
@@ -147,9 +154,9 @@ class RoleBasedRunner(object):
         from algorithms.algorithm.rMAPPOPolicy import RMAPPOPolicy as Policy
 
         # Step 6: 角色定义与受控智能体集合
-        self.agent_role = {aid: "hunter" for aid in range(self.num_hunters)}
+        self.agent_role = {aid: "hunter" for aid in range(self.train_max_hunters_num)}
         self.agent_role[self.target_index] = "target"
-        self.controlled_agents = list(range(self.num_hunters))
+        self.controlled_agents = list(range(self.train_max_hunters_num))
         if self.target_trainable:
             self.controlled_agents.append(self.target_index)
 
@@ -218,7 +225,7 @@ class RoleBasedRunner(object):
 
         args.env_name = self.cfg.env.env_name
         args.episode_length = self.cfg.env.episode_length
-        args.num_agents = int(self.cfg.env.num_hunters) + int(self.cfg.env.num_explorers) + 1
+        args.num_agents = int(self.train_max_hunters_num) + int(self.cfg.env.num_explorers) + 1
         args.use_obs_instead_of_state = False
 
         # Step 3: 写入模型参数
@@ -268,6 +275,7 @@ class RoleBasedRunner(object):
         args.log_interval = self.cfg.logging.log_interval
         args.use_eval = self.cfg.eval.use_eval
         args.eval_interval = self.cfg.eval.val_interval
+        args.eval_episode_length = self.eval_episode_length
         args.save_gifs = self.cfg.render.save_gifs
         args.use_render = self.cfg.render.use_render
         args.render_episodes = self.cfg.render.render_episodes
@@ -302,9 +310,10 @@ class RoleBasedRunner(object):
             )
         )
         print(
-            "[TrainStart] eval={}, eval_interval={}, save_interval={}, log_interval={}, log_csv={}, eval_csv={}".format(
+            "[TrainStart] eval={}, eval_interval={}, eval_episode_len={}, save_interval={}, log_interval={}, log_csv={}, eval_csv={}".format(
                 bool(self.use_eval),
                 int(self.eval_interval),
+                int(self.eval_episode_length),
                 int(self.save_interval),
                 int(self.log_interval),
                 self.log_csv_path,
@@ -318,7 +327,9 @@ class RoleBasedRunner(object):
                 for role_name in self.role_trainers.keys():
                     self.role_trainers[role_name].policy.lr_decay(episode, episodes)
 
+            # 是否需要进行eval，需要的话根据log_gif参数进行GIF录制
             do_eval_this_episode = self.use_eval and episode % max(1, self.eval_interval) == 0
+
             do_train_gif_this_episode = bool(do_eval_this_episode and self.log_gif)
             if do_train_gif_this_episode:
                 self._print_timed(
@@ -327,10 +338,13 @@ class RoleBasedRunner(object):
                         ",".join([str(int(x)) for x in self.train_gif_env_ids]),
                     )
                 )
+
             if do_eval_this_episode:
                 self._print_timed("[Train] episode {} trigger eval".format(int(episode)))
+
             if hasattr(self.envs, "capture_terminal_frame"):
                 self.envs.capture_terminal_frame = bool(do_train_gif_this_episode)
+
             train_frames = [[] for _ in range(self.n_rollout_threads)]
             train_gif_finished = np.zeros(self.n_rollout_threads, dtype=bool)
             train_capture_step = np.full(self.n_rollout_threads, -1, dtype=np.int32)
@@ -368,12 +382,14 @@ class RoleBasedRunner(object):
 
                 # Observe reward and next obs
                 obs, rewards, dones, infos = self.envs.step(actions_env)
-                episode_hunter_reward += float(np.sum(rewards[:, : self.num_hunters, 0]))
+                episode_hunter_reward += float(np.sum(rewards[:, : self.train_max_hunters_num, 0]))
                 episode_target_reward += float(np.sum(rewards[:, self.target_index, 0]))
+
+                # 本次episode阶段active的hunters数量
                 if episode_active_hunter_slots is None:
                     active_cnt = 0
                     for env_infos in infos:
-                        for hid in range(self.num_hunters):
+                        for hid in range(self.train_max_hunters_num):
                             if hid < len(env_infos) and bool(env_infos[hid].get("active_agent", True)):
                                 active_cnt += 1
                     episode_active_hunter_slots = int(active_cnt)
@@ -391,7 +407,7 @@ class RoleBasedRunner(object):
                                 train_capture_step[env_i] = int(step + 1)
                             hunter_alive_flags = [
                                 float(agent_info.get("alive", False))
-                                for agent_info in env_infos[: self.num_hunters]
+                                for agent_info in env_infos[: self.train_max_hunters_num]
                             ]
                             train_alive_rate[env_i] = (
                                 float(np.mean(hunter_alive_flags)) if len(hunter_alive_flags) > 0 else 0.0
@@ -426,7 +442,7 @@ class RoleBasedRunner(object):
             hunter_reward_denominator = (
                 episode_active_hunter_slots
                 if episode_active_hunter_slots is not None
-                else self.n_rollout_threads * self.num_hunters
+                    else self.n_rollout_threads * self.train_max_hunters_num
             )
             self._append_log_csv(
                 episode=episode,
@@ -463,15 +479,23 @@ class RoleBasedRunner(object):
                     )
                 )
                 self._print_timed(
-                    "[Progress] {:.1f}% | elapsed={} | eta={} | hunter_reward_mean={:.4f} | target_reward_mean={:.4f} | hunter_alive={:.4f} | target_alive={:.4f}".format(
-                        100.0 * progress,
-                        self._format_duration(elapsed),
-                        self._format_duration(eta_sec),
-                        episode_hunter_reward / max(1, hunter_reward_denominator),
-                        episode_target_reward / max(1, self.n_rollout_threads),
-                        hunter_alive_mean,
-                        target_alive_mean,
-                    )
+                    "[Progress] episode={}/{}".format(int(episode), int(episodes))
+                )
+                self._print_metric_table(
+                    "ProgressMetrics",
+                    {
+                        "progress_pct": "{:.1f}".format(100.0 * progress),
+                        "elapsed": self._format_duration(elapsed),
+                        "eta": self._format_duration(eta_sec),
+                        "hunter_reward_mean": "{:.4f}".format(
+                            episode_hunter_reward / max(1, hunter_reward_denominator)
+                        ),
+                        "target_reward_mean": "{:.4f}".format(
+                            episode_target_reward / max(1, self.n_rollout_threads)
+                        ),
+                        "hunter_alive": "{:.4f}".format(hunter_alive_mean),
+                        "target_alive": "{:.4f}".format(target_alive_mean),
+                    },
                 )
                 self.log_train(train_infos, total_num_steps)
 
@@ -1052,7 +1076,7 @@ class RoleBasedRunner(object):
             return {
                 "eval_reward": 0.0,
                 "capture_rate": 0.0,
-                "capture_steps": float(self.episode_length),
+                "capture_steps": float(self.eval_episode_length),
                 "alive_rate": 0.0,
                 "captured_episodes": 0,
                 "total_eval_episodes": 0,
@@ -1060,7 +1084,13 @@ class RoleBasedRunner(object):
 
         eval_obs = eval_envs.reset(mode="recover")
         n_env = int(eval_obs.shape[0])
+        eval_num_agents = int(eval_obs.shape[1])
+        eval_num_hunters = int(max(1, eval_num_agents - 1))
+        eval_target_index = int(eval_num_agents - 1)
         act_dim = int(eval_envs.action_space[0].shape[0])
+        eval_controlled_agents = list(range(eval_num_hunters))
+        if self.target_trainable:
+            eval_controlled_agents.append(eval_target_index)
         self._print_timed(
             "[EvalStart] bucket={}, episode={}, total_steps={}, eval_envs={}".format(
                 str(bucket), int(episode), int(total_num_steps), n_env
@@ -1071,18 +1101,18 @@ class RoleBasedRunner(object):
 
         eval_rnn_states = {
             aid: np.zeros((n_env, self.recurrent_N, self.hidden_size), dtype=np.float32)
-            for aid in self.controlled_agents
+            for aid in eval_controlled_agents
         }
         eval_masks = {
             aid: np.ones((n_env, 1), dtype=np.float32)
-            for aid in self.controlled_agents
+            for aid in eval_controlled_agents
         }
 
         env_episode_rewards = np.zeros(n_env, dtype=np.float32)
         env_captured = np.zeros(n_env, dtype=bool)
         env_capture_step = np.full(n_env, -1, dtype=np.int32)
         env_alive_rate = np.full(n_env, 0.0, dtype=np.float32)
-        env_active_hunter_count = np.full(n_env, int(self.num_hunters), dtype=np.int32)
+        env_active_hunter_count = np.full(n_env, int(eval_num_hunters), dtype=np.int32)
         env_finished = np.zeros(n_env, dtype=bool)
         eval_frames = [[] for _ in range(n_env)]
         gif_env_ids = list(range(n_env))
@@ -1103,11 +1133,11 @@ class RoleBasedRunner(object):
 
         # Step 3: rollout一个评估episode长度
         eval_infos = [None for _ in range(n_env)]
-        for eval_step in range(self.episode_length):
-            eval_actions_env = np.zeros((n_env, self.num_agents, act_dim), dtype=np.float32)
+        for eval_step in range(self.eval_episode_length):
+            eval_actions_env = np.zeros((n_env, eval_num_agents, act_dim), dtype=np.float32)
 
-            for agent_id in self.controlled_agents:
-                role = self.agent_role[agent_id]
+            for agent_id in eval_controlled_agents:
+                role = "target" if (agent_id == eval_target_index and self.target_trainable) else "hunter"
                 trainer = self.role_trainers[role]
                 trainer.prep_rollout()
                 eval_action, next_eval_rnn_state = trainer.policy.act(
@@ -1123,11 +1153,18 @@ class RoleBasedRunner(object):
 
             for env_i in range(n_env):
                 if eval_infos[env_i] is not None and len(eval_infos[env_i]) > 0:
-                    env_active_hunter_count[env_i] = int(self._extract_active_hunter_count(eval_infos[env_i]))
+                    env_active_hunter_count[env_i] = int(
+                        self._extract_active_hunter_count(
+                            eval_infos[env_i],
+                            max_hunters_num=eval_num_hunters,
+                        )
+                    )
+                    
                 if env_finished[env_i]:
                     continue
                 env_episode_rewards[env_i] += float(
-                    np.sum(eval_rewards[env_i, : self.num_hunters, 0]) / max(1, self.num_hunters)
+                    np.sum(eval_rewards[env_i, : eval_num_hunters, 0])
+                    / max(1, eval_num_hunters)
                 )
                 if (not env_captured[env_i]) and any(
                     bool(agent_info.get("captured", False)) for agent_info in eval_infos[env_i]
@@ -1136,7 +1173,10 @@ class RoleBasedRunner(object):
                     env_capture_step[env_i] = int(eval_step + 1)
                 if bool(np.all(eval_dones[env_i])):
                     env_alive_rate[env_i] = float(
-                        self._compute_hunter_alive_rate(eval_infos[env_i])
+                        self._compute_hunter_alive_rate(
+                            eval_infos[env_i],
+                            max_hunters_num=eval_num_hunters,
+                        )
                     )
                     if save_gifs and env_i in gif_env_id_set:
                         terminal_frame = self._extract_terminal_frame(eval_infos[env_i])
@@ -1156,7 +1196,7 @@ class RoleBasedRunner(object):
                     if isinstance(frame, np.ndarray):
                         eval_frames[env_i].append(frame.copy())
 
-            for agent_id in self.controlled_agents:
+            for agent_id in eval_controlled_agents:
                 done_mask = eval_dones[:, agent_id].astype(bool)
                 eval_masks[agent_id] = np.ones((n_env, 1), dtype=np.float32)
                 eval_masks[agent_id][done_mask] = 0.0
@@ -1171,7 +1211,12 @@ class RoleBasedRunner(object):
                 continue
             if eval_infos[env_i] is None or len(eval_infos[env_i]) == 0:
                 continue
-            env_alive_rate[env_i] = float(self._compute_hunter_alive_rate(eval_infos[env_i]))
+            env_alive_rate[env_i] = float(
+                self._compute_hunter_alive_rate(
+                    eval_infos[env_i],
+                    max_hunters_num=eval_num_hunters,
+                )
+            )
 
         # Step 4: 汇总评估指标
         total_eval_episodes = int(n_env)
@@ -1181,7 +1226,7 @@ class RoleBasedRunner(object):
 
         captured_steps = [int(env_capture_step[i]) for i in range(n_env) if env_captured[i] and env_capture_step[i] > 0]
         capture_steps = (
-            float(np.mean(captured_steps)) if len(captured_steps) > 0 else float(self.episode_length)
+            float(np.mean(captured_steps)) if len(captured_steps) > 0 else float(self.eval_episode_length)
         )
 
         eval_metrics = {
@@ -1200,15 +1245,17 @@ class RoleBasedRunner(object):
             env_active_hunter_count=env_active_hunter_count,
         )
 
-        self._print_timed(
-            "[Eval] bucket={}, episode={}, reward={:.4f}, capture_rate={:.4f}, capture_steps={:.2f}, alive_rate={:.4f}".format(
-                str(bucket),
-                int(episode),
-                eval_reward,
-                capture_rate,
-                capture_steps,
-                float(eval_metrics["alive_rate"]),
-            )
+        self._print_metric_table(
+            "EvalMetrics[{}]".format(str(bucket)),
+            {
+                "episode": str(int(episode)),
+                "reward": "{:.4f}".format(eval_reward),
+                "capture_rate": "{:.4f}".format(capture_rate),
+                "capture_steps": "{:.2f}".format(capture_steps),
+                "alive_rate": "{:.4f}".format(float(eval_metrics["alive_rate"])),
+                "captured_ep": str(int(captured_episodes)),
+                "total_eval_ep": str(int(total_eval_episodes)),
+            },
         )
 
         # Step 5: 记录TB与CSV（可选）
@@ -1498,7 +1545,7 @@ class RoleBasedRunner(object):
                 [
                     int(episode),
                     int(total_num_steps),
-                    int(self.num_hunters),
+                    int(self.train_max_hunters_num),
                     1,
                     float(hunter_alive_mean),
                     float(target_alive_mean),
@@ -1570,14 +1617,21 @@ class RoleBasedRunner(object):
         for env_infos in infos:
             if env_infos is None or len(env_infos) == 0:
                 continue
-            hunter_alive.append(float(self._compute_hunter_alive_rate(env_infos)))
+            hunter_alive.append(
+                float(
+                    self._compute_hunter_alive_rate(
+                        env_infos,
+                        max_hunters_num=self.train_max_hunters_num,
+                    )
+                )
+            )
             target_alive.append(float(env_infos[self.target_index].get("alive", False)))
 
         if len(hunter_alive) == 0:
             return 0.0, 0.0
         return float(np.mean(hunter_alive)), float(np.mean(target_alive))
 
-    def _extract_active_hunter_count(self, env_infos):
+    def _extract_active_hunter_count(self, env_infos, max_hunters_num):
         """
         功能:
             统计单环境当前激活的hunter数量。
@@ -1588,11 +1642,11 @@ class RoleBasedRunner(object):
         """
         # Step 1: 空输入回退到配置最大hunter数量。
         if env_infos is None or len(env_infos) == 0:
-            return int(max(1, self.num_hunters))
+            return int(max(1, int(max_hunters_num)))
 
         # Step 2: 优先按active_agent字段统计激活hunter数量。
         active_count = 0
-        for hid in range(self.num_hunters):
+        for hid in range(int(max_hunters_num)):
             if hid >= len(env_infos):
                 break
             agent_info = env_infos[hid]
@@ -1602,7 +1656,7 @@ class RoleBasedRunner(object):
                 active_count += 1
         return int(max(1, active_count))
 
-    def _compute_hunter_alive_rate(self, env_infos):
+    def _compute_hunter_alive_rate(self, env_infos, max_hunters_num):
         """
         功能:
             计算单环境hunter存活率（分母为激活hunter数量，而非最大hunter槽位）。
@@ -1618,7 +1672,7 @@ class RoleBasedRunner(object):
         # Step 2: 仅统计active_agent=True的hunter，修正分母偏大问题。
         alive_count = 0.0
         active_count = 0.0
-        for hid in range(self.num_hunters):
+        for hid in range(int(max_hunters_num)):
             if hid >= len(env_infos):
                 break
             agent_info = env_infos[hid]
@@ -1676,7 +1730,7 @@ class RoleBasedRunner(object):
             mean_capture_steps = (
                 float(np.mean(grouped_capture_steps))
                 if len(grouped_capture_steps) > 0
-                else float(self.episode_length)
+                else float(self.eval_episode_length)
             )
             out[int(hunter_count)] = {
                 "eval_reward": float(np.mean(rewards[mask])) if total_eval_episodes > 0 else 0.0,
@@ -1850,7 +1904,32 @@ class RoleBasedRunner(object):
         输出:
             无。
         """
-        print(f"{self._time_prefix()} {str(message)}")
+        print(f"{self._time_prefix()} {str(message)}\n")
+
+    def _print_metric_table(self, title, metrics):
+        """
+        功能:
+            以两行对齐表格打印指标（第一行名称，第二行数值）。
+        输入:
+            title (str): 表格标题。
+            metrics (dict): 指标名到指标值映射。
+        输出:
+            无。
+        """
+        if metrics is None or len(metrics) == 0:
+            self._print_timed(f"[{str(title)}] (empty)")
+            return
+
+        keys = [str(k) for k in metrics.keys()]
+        values = [str(v) for v in metrics.values()]
+        widths = [max(len(k), len(v)) for k, v in zip(keys, values)]
+        header = " | ".join(k.ljust(w) for k, w in zip(keys, widths))
+        row = " | ".join(v.ljust(w) for v, w in zip(values, widths))
+
+        self._print_timed(f"[{str(title)}]")
+        print(header)
+        print(row)
+        print("")
 
     def _peek_fixed_metric_updates(self, eval_metrics):
         """
@@ -1920,17 +1999,17 @@ class RoleBasedRunner(object):
             best["capture_rate"] = float(eval_metrics["capture_rate"])
         if "capture_steps" in updated_metrics:
             best["capture_steps"] = float(eval_metrics["capture_steps"])
-        print(
-            "[EvalSummary][{}] current: reward={:.4f}, capture_rate={:.4f}, capture_steps={:.2f} | best: reward={:.4f}, capture_rate={:.4f}, capture_steps={:.2f} | updated={}".format(
-                str(bucket),
-                float(eval_metrics["eval_reward"]),
-                float(eval_metrics["capture_rate"]),
-                float(eval_metrics["capture_steps"]),
-                float(best["eval_reward"]),
-                float(best["capture_rate"]),
-                float(best["capture_steps"]),
-                ",".join(updated_metrics) if len(updated_metrics) > 0 else "none",
-            )
+        self._print_metric_table(
+            "EvalSummary[{}]".format(str(bucket)),
+            {
+                "cur_reward": "{:.4f}".format(float(eval_metrics["eval_reward"])),
+                "cur_capture_rate": "{:.4f}".format(float(eval_metrics["capture_rate"])),
+                "cur_capture_steps": "{:.2f}".format(float(eval_metrics["capture_steps"])),
+                "best_reward": "{:.4f}".format(float(best["eval_reward"])),
+                "best_capture_rate": "{:.4f}".format(float(best["capture_rate"])),
+                "best_capture_steps": "{:.2f}".format(float(best["capture_steps"])),
+                "updated": ",".join(updated_metrics) if len(updated_metrics) > 0 else "none",
+            },
         )
         return updated_metrics
 
@@ -1963,17 +2042,18 @@ class RoleBasedRunner(object):
             self._save_best_snapshot("capture_steps", episode, eval_metrics)
             updated_metrics.append("capture_steps")
 
-        print(
-            "[EvalSummary] episode={} | current: reward={:.4f}, capture_rate={:.4f}, capture_steps={:.2f} | best: reward={:.4f}, capture_rate={:.4f}, capture_steps={:.2f} | updated={}".format(
-                int(episode),
-                float(eval_metrics["eval_reward"]),
-                float(eval_metrics["capture_rate"]),
-                float(eval_metrics["capture_steps"]),
-                float(self.best_eval_metrics["reward"]),
-                float(self.best_eval_metrics["capture_rate"]),
-                float(self.best_eval_metrics["capture_steps"]),
-                ",".join(updated_metrics) if len(updated_metrics) > 0 else "none",
-            )
+        self._print_metric_table(
+            "EvalSummary[fixed]",
+            {
+                "episode": str(int(episode)),
+                "cur_reward": "{:.4f}".format(float(eval_metrics["eval_reward"])),
+                "cur_capture_rate": "{:.4f}".format(float(eval_metrics["capture_rate"])),
+                "cur_capture_steps": "{:.2f}".format(float(eval_metrics["capture_steps"])),
+                "best_reward": "{:.4f}".format(float(self.best_eval_metrics["reward"])),
+                "best_capture_rate": "{:.4f}".format(float(self.best_eval_metrics["capture_rate"])),
+                "best_capture_steps": "{:.2f}".format(float(self.best_eval_metrics["capture_steps"])),
+                "updated": ",".join(updated_metrics) if len(updated_metrics) > 0 else "none",
+            },
         )
         return updated_metrics
 

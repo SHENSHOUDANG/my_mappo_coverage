@@ -231,7 +231,7 @@ class EnvRunner(Runner):
         )
         eval_masks = np.ones((self.n_eval_rollout_threads, self.num_agents, 1), dtype=np.float32)
 
-        for eval_step in range(self.episode_length):
+        for eval_step in range(self.eval_episode_length):
             self.trainer.prep_rollout()
             eval_action, eval_rnn_states = self.trainer.policy.act(
                 np.concatenate(eval_obs),

@@ -16,7 +16,7 @@ env:
   world_size: 100
   episode_length: 256 # max steps per episode
   dt: 0.1
-  num_hunters: 5
+  max_hunters_num: 5
   num_explorers: 0
   neighbor_N: 3
 
@@ -128,6 +128,7 @@ logging:
   log_gif: false         # 训练阶段是否按规则保存GIF
 
 eval:
+  eval_episode_length: 600
   fixed_tasks: []
   fixed_tasks_file: config/eval_tasks/patrol_tasks_h8_n100.yaml
 

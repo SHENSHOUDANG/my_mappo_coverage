@@ -22,9 +22,10 @@ import torch
 from utils.util import load_config
 from train.train import (
     _build_target_learn_eval_specs,
-    _infer_max_num_hunters_from_eval_tasks,
     _load_eval_task_specs,
     _print_domain_randomization_settings,
+    _resolve_eval_max_hunters_num,
+    _resolve_train_max_hunters_num,
     make_eval_env,
     make_train_env,
 )
@@ -115,31 +116,34 @@ def main(args):
                 int(merged_cfg.exp.n_eval_rollout_threads)
             )
         )
-    required_eval_hunters = _infer_max_num_hunters_from_eval_tasks(
-        eval_task_specs=eval_task_specs,
-        fallback_num_hunters=int(merged_cfg.env.num_hunters),
+    train_max_hunters_num = _resolve_train_max_hunters_num(merged_cfg)
+    eval_max_hunters_num = _resolve_eval_max_hunters_num(merged_cfg, eval_task_specs)
+    _print_domain_randomization_settings(
+        merged_cfg,
+        eval_task_specs,
+        train_max_hunters_num=train_max_hunters_num,
+        eval_max_hunters_num=eval_max_hunters_num,
     )
-    if int(required_eval_hunters) != int(merged_cfg.env.num_hunters):
-        print(
-            "[EvalConfig] override env.num_hunters={} (max from fixed tasks; old={})".format(
-                int(required_eval_hunters),
-                int(merged_cfg.env.num_hunters),
-            )
-        )
-        merged_cfg.env.num_hunters = int(required_eval_hunters)
-    _print_domain_randomization_settings(merged_cfg, eval_task_specs)
 
-    envs = make_train_env(merged_cfg)
-    eval_envs = make_eval_env(merged_cfg, eval_task_specs)
+    envs = make_train_env(merged_cfg, train_max_hunters_num=train_max_hunters_num)
+    eval_envs = make_eval_env(
+        merged_cfg,
+        eval_task_specs,
+        eval_max_hunters_num=eval_max_hunters_num,
+    )
     eval_envs_target_learn = None
     if str(merged_cfg.env.target_policy_source).lower() == "learn":
         eval_task_specs_target_learn = _build_target_learn_eval_specs(eval_task_specs)
-        eval_envs_target_learn = make_eval_env(merged_cfg, eval_task_specs_target_learn)
+        eval_envs_target_learn = make_eval_env(
+            merged_cfg,
+            eval_task_specs_target_learn,
+            eval_max_hunters_num=eval_max_hunters_num,
+        )
 
     # Step 4: 构建Runner并执行“重载模型目录评估”
     from runner.uav.role_runner import RoleBasedRunner as Runner
 
-    num_agents = int(merged_cfg.env.num_hunters) + int(merged_cfg.env.num_explorers) + 1
+    num_agents = int(train_max_hunters_num) + int(merged_cfg.env.num_explorers) + 1
     runner_cfg = {
         "envs": envs,
         "eval_envs": eval_envs,
@@ -147,6 +151,8 @@ def main(args):
         "device": device,
         "run_dir": run_dir,
         "num_agents": num_agents,
+        "train_max_hunters_num": int(train_max_hunters_num),
+        "eval_max_hunters_num": int(eval_max_hunters_num),
         "init_csv": False,
     }
     runner = Runner(runner_cfg, merged_cfg)

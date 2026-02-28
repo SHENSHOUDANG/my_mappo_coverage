@@ -26,6 +26,40 @@ from utils.util import load_config
 from envs.env_wrappers import DummyVecEnv
 
 
+class _TeeStream:
+    """
+    将stdout/stderr双写到终端与文件。
+    """
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+        return len(data)
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
+
+    def isatty(self):
+        return any(getattr(s, "isatty", lambda: False)() for s in self.streams)
+
+
+def _to_plain_data(obj):
+    """
+    将EasyDict/嵌套容器转换为可yaml序列化的普通Python结构。
+    """
+    if isinstance(obj, dict):
+        return {k: _to_plain_data(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_to_plain_data(v) for v in obj]
+    if isinstance(obj, tuple):
+        return [_to_plain_data(v) for v in obj]
+    return obj
+
+
 def _load_eval_task_specs(merged_cfg):
     """
     构建评估线程对应的固定任务规格列表。
@@ -97,22 +131,22 @@ def _build_target_learn_eval_specs(eval_task_specs):
     return out
 
 
-def _infer_max_num_hunters_from_eval_tasks(eval_task_specs, fallback_num_hunters):
+def _infer_max_num_hunters_from_eval_tasks(eval_task_specs, fallback_max_hunters_num):
     """
     从固定评估任务中推断所需的最大hunter数量。
 
     输入:
         eval_task_specs (list[dict] | None): 固定评估任务列表。
-        fallback_num_hunters (int): 当任务未提供num_hunters时的回退值。
+        fallback_max_hunters_num (int): 当任务未提供num_hunters时的回退值。
     输出:
         int: 评估任务要求的最大hunter数量（最小为1）。
     """
     # Step 1: 空任务回退到配置值。
     if eval_task_specs is None or len(eval_task_specs) == 0:
-        return int(max(1, int(fallback_num_hunters)))
+        return int(max(1, int(fallback_max_hunters_num)))
 
     # Step 2: 扫描所有任务的num_hunters并取最大值。
-    max_hunters = int(max(1, int(fallback_num_hunters)))
+    max_hunters = int(max(1, int(fallback_max_hunters_num)))
     for spec in eval_task_specs:
         if not isinstance(spec, dict):
             continue
@@ -124,7 +158,45 @@ def _infer_max_num_hunters_from_eval_tasks(eval_task_specs, fallback_num_hunters
     return int(max(1, max_hunters))
 
 
-def _print_domain_randomization_settings(merged_cfg, eval_task_specs):
+def _resolve_train_max_hunters_num(merged_cfg):
+    """
+    解析训练环境使用的最大hunter数量。
+
+    输入:
+        merged_cfg (EasyDict): 分层配置对象。
+    输出:
+        int: train env最大hunter数量（最小为1）。
+    """
+    env_max = int(max(1, int(merged_cfg.env.max_hunters_num)))
+    choices = [int(x) for x in list(merged_cfg.domain_randomization.train_split.hunter_count_choices)]
+    choice_max = max(choices) if len(choices) > 0 else env_max
+    return int(max(env_max, choice_max))
+
+
+def _resolve_eval_max_hunters_num(merged_cfg, eval_task_specs):
+    """
+    解析评估环境使用的最大hunter数量。
+
+    输入:
+        merged_cfg (EasyDict): 分层配置对象。
+        eval_task_specs (list[dict] | None): 固定评估任务列表。
+    输出:
+        int: eval env最大hunter数量（最小为1）。
+    """
+    base_max = int(max(1, int(merged_cfg.env.max_hunters_num)))
+    task_max = _infer_max_num_hunters_from_eval_tasks(
+        eval_task_specs=eval_task_specs,
+        fallback_max_hunters_num=base_max,
+    )
+    return int(max(base_max, int(task_max)))
+
+
+def _print_domain_randomization_settings(
+    merged_cfg,
+    eval_task_specs,
+    train_max_hunters_num,
+    eval_max_hunters_num,
+):
     """
     打印domain randomization配置，便于训练启动时快速确认。
 
@@ -150,15 +222,33 @@ def _print_domain_randomization_settings(merged_cfg, eval_task_specs):
     if merged_cfg.eval.fixed_tasks_file is not None:
         eval_source = str(merged_cfg.eval.fixed_tasks_file)
     print(
-        "[EvalConfig] fixed_task_source={}, fixed_tasks={}, dual_eval_target_learn={}".format(
+        "[EvalConfig] fixed_task_source={}, fixed_tasks={}, train_max_hunters_num={}, eval_max_hunters_num={}, eval_episode_length={}, dual_eval_target_learn={}".format(
             eval_source,
             0 if eval_task_specs is None else int(len(eval_task_specs)),
+            int(train_max_hunters_num),
+            int(eval_max_hunters_num),
+            int(_resolve_eval_episode_length(merged_cfg)),
             str(merged_cfg.env.target_policy_source).lower() == "learn",
         )
     )
 
 
-def make_train_env(merged_cfg):
+def _resolve_eval_episode_length(merged_cfg):
+    """
+    解析评估阶段episode最大步数。
+
+    输入:
+        merged_cfg (EasyDict): 分层配置对象。
+    输出:
+        int: 评估阶段episode最大步数（最小为1）。
+    """
+    eval_episode_length = getattr(merged_cfg.eval, "eval_episode_length", None)
+    if eval_episode_length is None:
+        return int(max(1, int(merged_cfg.env.episode_length)))
+    return int(max(1, int(eval_episode_length)))
+
+
+def make_train_env(merged_cfg, train_max_hunters_num):
     """
     创建训练环境向量封装。
 
@@ -169,6 +259,9 @@ def make_train_env(merged_cfg):
     输出:
         DummyVecEnv: 向量化环境，接口满足现有MAPPO训练循环。
     """
+
+    train_cfg = copy.deepcopy(merged_cfg)
+    train_cfg.env.max_hunters_num = int(train_max_hunters_num)
 
     def get_env_fn(rank):
         """
@@ -187,19 +280,19 @@ def make_train_env(merged_cfg):
             """
             from envs.env_continuous import ContinuousActionEnv
 
-            env = ContinuousActionEnv(merged_cfg)
+            env = ContinuousActionEnv(train_cfg)
             env.set_regen_scope("train")
-            env.seed(int(merged_cfg.exp.seed) + rank * 1000)
+            env.seed(int(train_cfg.exp.seed) + rank * 1000)
             return env
 
         return init_env
 
-    vec_env = DummyVecEnv([get_env_fn(i) for i in range(int(merged_cfg.exp.n_rollout_threads))])
+    vec_env = DummyVecEnv([get_env_fn(i) for i in range(int(train_cfg.exp.n_rollout_threads))])
     vec_env.set_auto_reset(mode="initial")
     return vec_env
 
 
-def make_eval_env(merged_cfg, eval_task_specs):
+def make_eval_env(merged_cfg, eval_task_specs, eval_max_hunters_num):
     """
     创建评估环境向量封装。
 
@@ -211,13 +304,10 @@ def make_eval_env(merged_cfg, eval_task_specs):
         DummyVecEnv: 评估向量环境。
     """
 
-    # Step 0: 使用fixed task中最大num_hunters构建eval配置，避免active_hunter被环境上限截断。
+    # Step 0: 使用外部传入的eval最大hunter数量构建评估环境。
     eval_cfg = copy.deepcopy(merged_cfg)
-    required_eval_hunters = _infer_max_num_hunters_from_eval_tasks(
-        eval_task_specs=eval_task_specs,
-        fallback_num_hunters=int(merged_cfg.env.num_hunters),
-    )
-    eval_cfg.env.num_hunters = int(required_eval_hunters)
+    eval_cfg.env.max_hunters_num = int(eval_max_hunters_num)
+    eval_cfg.env.episode_length = int(_resolve_eval_episode_length(merged_cfg))
 
     def get_env_fn(rank):
         """
@@ -330,74 +420,108 @@ def main(args):
     run_dir = run_root / curr_run
     os.makedirs(str(run_dir), exist_ok=True)
 
-    # Step 4: 进程名与随机种子
-    setproctitle.setproctitle(
-        f"{merged_cfg.exp.algorithm_name}-{merged_cfg.env.env_name}-{merged_cfg.exp.experiment_name}"
-    )
-    torch.manual_seed(int(merged_cfg.exp.seed))
-    torch.cuda.manual_seed_all(int(merged_cfg.exp.seed))
-    np.random.seed(int(merged_cfg.exp.seed))
+    # Step 4: 初始化训练日志tee输出
+    train_log_path = run_dir / "train.log"
+    log_f = open(train_log_path, "a", encoding="utf-8", buffering=1)
+    orig_stdout = sys.stdout
+    orig_stderr = sys.stderr
+    sys.stdout = _TeeStream(orig_stdout, log_f)
+    sys.stderr = _TeeStream(orig_stderr, log_f)
 
-    # Step 5: 构建环境
-    eval_task_specs, from_external_file = _load_eval_task_specs(merged_cfg) if bool(merged_cfg.eval.use_eval) else (None, False)
-    if bool(merged_cfg.eval.use_eval) and bool(from_external_file) and eval_task_specs is not None:
-        merged_cfg.exp.n_eval_rollout_threads = int(len(eval_task_specs))
-        print(
-            "[EvalConfig] override n_eval_rollout_threads={} (from external fixed task file)".format(
-                int(merged_cfg.exp.n_eval_rollout_threads)
-            )
+    try:
+        # Step 5: 进程名与随机种子
+        setproctitle.setproctitle(
+            f"{merged_cfg.exp.algorithm_name}-{merged_cfg.env.env_name}-{merged_cfg.exp.experiment_name}"
         )
-    if bool(merged_cfg.eval.use_eval):
-        required_eval_hunters = _infer_max_num_hunters_from_eval_tasks(
-            eval_task_specs=eval_task_specs,
-            fallback_num_hunters=int(merged_cfg.env.num_hunters),
-        )
-        if int(required_eval_hunters) != int(merged_cfg.env.num_hunters):
+        torch.manual_seed(int(merged_cfg.exp.seed))
+        torch.cuda.manual_seed_all(int(merged_cfg.exp.seed))
+        np.random.seed(int(merged_cfg.exp.seed))
+
+        # Step 6: 构建环境前处理
+        eval_task_specs, from_external_file = _load_eval_task_specs(merged_cfg) if bool(merged_cfg.eval.use_eval) else (None, False)
+        if bool(merged_cfg.eval.use_eval) and bool(from_external_file) and eval_task_specs is not None:
+            merged_cfg.exp.n_eval_rollout_threads = int(len(eval_task_specs))
             print(
-                "[EvalConfig] override env.num_hunters={} (max from fixed tasks; old={})".format(
-                    int(required_eval_hunters),
-                    int(merged_cfg.env.num_hunters),
+                "[EvalConfig] override n_eval_rollout_threads={} (from external fixed task file)".format(
+                    int(merged_cfg.exp.n_eval_rollout_threads)
                 )
             )
-            merged_cfg.env.num_hunters = int(required_eval_hunters)
-    _print_domain_randomization_settings(merged_cfg, eval_task_specs)
-    envs = make_train_env(merged_cfg)
-    eval_envs = make_eval_env(merged_cfg, eval_task_specs) if bool(merged_cfg.eval.use_eval) else None
-    eval_envs_target_learn = None
-    if bool(merged_cfg.eval.use_eval) and str(merged_cfg.env.target_policy_source).lower() == "learn":
-        eval_task_specs_target_learn = _build_target_learn_eval_specs(eval_task_specs)
-        eval_envs_target_learn = make_eval_env(merged_cfg, eval_task_specs_target_learn)
+        train_max_hunters_num = _resolve_train_max_hunters_num(merged_cfg)
+        eval_max_hunters_num = _resolve_eval_max_hunters_num(merged_cfg, eval_task_specs)
+        _print_domain_randomization_settings(
+            merged_cfg,
+            eval_task_specs,
+            train_max_hunters_num=train_max_hunters_num,
+            eval_max_hunters_num=eval_max_hunters_num,
+        )
 
-    # Step 6: 构建Runner配置
-    num_agents = int(merged_cfg.env.num_hunters) + int(merged_cfg.env.num_explorers) + 1
-    runner_cfg = {
-        "envs": envs,
-        "eval_envs": eval_envs,
-        "eval_envs_target_learn": eval_envs_target_learn,
-        "device": device,
-        "run_dir": run_dir,
-        "num_agents": num_agents,
-        "time_stat": bool(args.time_stat),
-    }
+        # Step 7: 保存当前实际训练配置快照
+        cfg_out_path = run_dir / "train_cfg.yaml"
+        with open(cfg_out_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(
+                _to_plain_data(merged_cfg),
+                f,
+                allow_unicode=True,
+                sort_keys=False,
+            )
+        print("[Config] saved merged training config to {}".format(str(cfg_out_path)))
 
-    # Step 7: 使用Multi-UAV专用Runner（分层配置 + 角色共享策略）
-    from runner.uav.role_runner import RoleBasedRunner as Runner
+        # Step 8: 构建环境
+        envs = make_train_env(merged_cfg, train_max_hunters_num=train_max_hunters_num)
+        eval_envs = (
+            make_eval_env(
+                merged_cfg,
+                eval_task_specs,
+                eval_max_hunters_num=eval_max_hunters_num,
+            )
+            if bool(merged_cfg.eval.use_eval)
+            else None
+        )
+        eval_envs_target_learn = None
+        if bool(merged_cfg.eval.use_eval) and str(merged_cfg.env.target_policy_source).lower() == "learn":
+            eval_task_specs_target_learn = _build_target_learn_eval_specs(eval_task_specs)
+            eval_envs_target_learn = make_eval_env(
+                merged_cfg,
+                eval_task_specs_target_learn,
+                eval_max_hunters_num=eval_max_hunters_num,
+            )
 
-    runner = Runner(runner_cfg, merged_cfg)
-    if bool(args.time_stat):
-        runner.run_time_stat()
-    else:
-        runner.run()
+        # Step 9: 构建Runner配置
+        num_agents = int(train_max_hunters_num) + int(merged_cfg.env.num_explorers) + 1
+        runner_cfg = {
+            "envs": envs,
+            "eval_envs": eval_envs,
+            "eval_envs_target_learn": eval_envs_target_learn,
+            "device": device,
+            "run_dir": run_dir,
+            "num_agents": num_agents,
+            "train_max_hunters_num": int(train_max_hunters_num),
+            "eval_max_hunters_num": int(eval_max_hunters_num),
+            "time_stat": bool(args.time_stat),
+        }
 
-    # Step 8: 收尾
-    envs.close()
-    if bool(merged_cfg.eval.use_eval) and eval_envs is not envs:
-        eval_envs.close()
-    if bool(merged_cfg.eval.use_eval) and eval_envs_target_learn is not None and eval_envs_target_learn is not envs:
-        eval_envs_target_learn.close()
+        # Step 10: 使用Multi-UAV专用Runner（分层配置 + 角色共享策略）
+        from runner.uav.role_runner import RoleBasedRunner as Runner
 
-    runner.writter.export_scalars_to_json(str(runner.log_dir + "/summary.json"))
-    runner.writter.close()
+        runner = Runner(runner_cfg, merged_cfg)
+        if bool(args.time_stat):
+            runner.run_time_stat()
+        else:
+            runner.run()
+
+        # Step 11: 收尾
+        envs.close()
+        if bool(merged_cfg.eval.use_eval) and eval_envs is not envs:
+            eval_envs.close()
+        if bool(merged_cfg.eval.use_eval) and eval_envs_target_learn is not None and eval_envs_target_learn is not envs:
+            eval_envs_target_learn.close()
+
+        runner.writter.export_scalars_to_json(str(runner.log_dir + "/summary.json"))
+        runner.writter.close()
+    finally:
+        sys.stdout = orig_stdout
+        sys.stderr = orig_stderr
+        log_f.close()
 
 
 if __name__ == "__main__":

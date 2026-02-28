@@ -1,6 +1,6 @@
 exp:
   algorithm_name: rmappo
-  experiment_name: acc5v1_learn_rnd_Eval-h8
+  experiment_name: acc5v1_learn_Eval-h8
   seed: 1
   cuda: true
   cuda_deterministic: true
@@ -16,7 +16,7 @@ env:
   world_size: 100
   episode_length: 400 # max steps per episode
   dt: 0.1
-  num_hunters: 5
+  max_hunters_num: 5
   num_explorers: 0
   neighbor_N: 3
 
@@ -128,12 +128,13 @@ logging:
   log_gif: true         # 训练阶段是否按规则保存GIF
 
 eval:
+  eval_episode_length: 600
   fixed_tasks: []
   fixed_tasks_file: config/eval_tasks/patrol_tasks_h8_n100.yaml
 
 domain_randomization:
   train_split:
-    enable: true
+    enable: false
     regen_interval_episode: 20
     regen_prob: 1.0
     hunter_count_choices: [1, 2, 3, 4, 5]

@@ -562,7 +562,7 @@ class UAVPursuitEnv(object):
         self.default_world_size = float(self.world_size)
         self.dt = float(env_cfg.dt)
         self.max_steps = int(env_cfg.episode_length)
-        self.num_hunters = int(env_cfg.num_hunters)
+        self.num_hunters = int(env_cfg.max_hunters_num)
         self.num_explorers = int(env_cfg.num_explorers)
         if self.num_explorers != 0:
             raise ValueError("当前阶段仅实现 hunter-only: num_explorers 必须为 0")

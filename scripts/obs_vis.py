@@ -359,7 +359,7 @@ class ObsVisApp:
         try:
             cfg = load_config(self.config_path)
             cfg.env.world_size = float(self.world_size_var.get())
-            cfg.env.num_hunters = int(self.num_hunters_var.get())
+            cfg.env.max_hunters_num = int(self.num_hunters_var.get())
             cfg.env.num_explorers = 0
             cfg.exp.seed = int(self.seed_var.get())
             cfg.Hunter.max_velo = float(self.hunter_max_vel_var.get())
