@@ -79,7 +79,8 @@ reward:
 
   # Escape-gap encirclement reward
   escape_gap_enable: true
-  escape_gap_reward_scale: 0.2
+  escape_gap_hunter_reward_scale: 0.2
+  escape_gap_target_reward_scale: 0.2
   escape_radius: 35.0
   escape_block_scale: 0.7
   escape_gap_angle_bins: 360
