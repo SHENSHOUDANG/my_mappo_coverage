@@ -210,6 +210,25 @@ class RoleBasedRunner(object):
         """
         # Step 1: 创建空命名空间
         args = argparse.Namespace()
+        train_max_hunters_num = int(
+            getattr(self, "train_max_hunters_num", int(self.cfg.env.max_hunters_num))
+        )
+        eval_episode_length = int(
+            getattr(
+                self,
+                "eval_episode_length",
+                max(
+                    1,
+                    int(
+                        getattr(
+                            self.cfg.eval,
+                            "eval_episode_length",
+                            self.cfg.env.episode_length,
+                        )
+                    ),
+                ),
+            )
+        )
 
         # Step 2: 写入实验与环境参数
         args.algorithm_name = self.cfg.exp.algorithm_name
@@ -225,7 +244,7 @@ class RoleBasedRunner(object):
 
         args.env_name = self.cfg.env.env_name
         args.episode_length = self.cfg.env.episode_length
-        args.num_agents = int(self.train_max_hunters_num) + int(self.cfg.env.num_explorers) + 1
+        args.num_agents = int(train_max_hunters_num) + int(self.cfg.env.num_explorers) + 1
         args.use_obs_instead_of_state = False
 
         # Step 3: 写入模型参数
@@ -275,7 +294,7 @@ class RoleBasedRunner(object):
         args.log_interval = self.cfg.logging.log_interval
         args.use_eval = self.cfg.eval.use_eval
         args.eval_interval = self.cfg.eval.val_interval
-        args.eval_episode_length = self.eval_episode_length
+        args.eval_episode_length = eval_episode_length
         args.save_gifs = self.cfg.render.save_gifs
         args.use_render = self.cfg.render.use_render
         args.render_episodes = self.cfg.render.render_episodes
@@ -1078,6 +1097,7 @@ class RoleBasedRunner(object):
                 "capture_rate": 0.0,
                 "capture_steps": float(self.eval_episode_length),
                 "alive_rate": 0.0,
+                "max_escape_gap_angle": float("nan"),
                 "captured_episodes": 0,
                 "total_eval_episodes": 0,
             }
@@ -1113,6 +1133,8 @@ class RoleBasedRunner(object):
         env_capture_step = np.full(n_env, -1, dtype=np.int32)
         env_alive_rate = np.full(n_env, 0.0, dtype=np.float32)
         env_active_hunter_count = np.full(n_env, int(eval_num_hunters), dtype=np.int32)
+        env_escape_gap_angle_sum = np.zeros(n_env, dtype=np.float32)
+        env_escape_gap_angle_count = np.zeros(n_env, dtype=np.int32)
         env_finished = np.zeros(n_env, dtype=bool)
         eval_frames = [[] for _ in range(n_env)]
         gif_env_ids = list(range(n_env))
@@ -1159,6 +1181,16 @@ class RoleBasedRunner(object):
                             max_hunters_num=eval_num_hunters,
                         )
                     )
+                    metric_info = (
+                        eval_infos[env_i][eval_target_index]
+                        if eval_target_index < len(eval_infos[env_i])
+                        else eval_infos[env_i][0]
+                    )
+                    metric_valid = bool(metric_info.get("max_escape_gap_metric_valid", False))
+                    metric_angle = float(metric_info.get("max_escape_gap_angle", float("nan")))
+                    if metric_valid and np.isfinite(metric_angle):
+                        env_escape_gap_angle_sum[env_i] += float(metric_angle)
+                        env_escape_gap_angle_count[env_i] += 1
                     
                 if env_finished[env_i]:
                     continue
@@ -1228,12 +1260,18 @@ class RoleBasedRunner(object):
         capture_steps = (
             float(np.mean(captured_steps)) if len(captured_steps) > 0 else float(self.eval_episode_length)
         )
+        valid_escape_counts = int(np.sum(env_escape_gap_angle_count))
+        if valid_escape_counts > 0:
+            max_escape_gap_angle = float(np.sum(env_escape_gap_angle_sum) / max(1, valid_escape_counts))
+        else:
+            max_escape_gap_angle = float("nan")
 
         eval_metrics = {
             "eval_reward": eval_reward,
             "capture_rate": capture_rate,
             "capture_steps": capture_steps,
             "alive_rate": float(np.mean(env_alive_rate)) if total_eval_episodes > 0 else 0.0,
+            "max_escape_gap_angle": float(max_escape_gap_angle),
             "captured_episodes": int(captured_episodes),
             "total_eval_episodes": int(total_eval_episodes),
         }
@@ -1253,6 +1291,11 @@ class RoleBasedRunner(object):
                 "capture_rate": "{:.4f}".format(capture_rate),
                 "capture_steps": "{:.2f}".format(capture_steps),
                 "alive_rate": "{:.4f}".format(float(eval_metrics["alive_rate"])),
+                "max_escape_gap": (
+                    "{:.4f}".format(float(max_escape_gap_angle))
+                    if np.isfinite(max_escape_gap_angle)
+                    else "NA"
+                ),
                 "captured_ep": str(int(captured_episodes)),
                 "total_eval_ep": str(int(total_eval_episodes)),
             },
@@ -1280,6 +1323,12 @@ class RoleBasedRunner(object):
                 {f"eval/{str(bucket)}/alive_rate": float(eval_metrics["alive_rate"])},
                 total_num_steps,
             )
+            if np.isfinite(max_escape_gap_angle):
+                self.writter.add_scalars(
+                    f"eval/{str(bucket)}/max_escape_gap_angle",
+                    {f"eval/{str(bucket)}/max_escape_gap_angle": float(max_escape_gap_angle)},
+                    total_num_steps,
+                )
 
             self._append_eval_csv(
                 episode=episode,
@@ -1289,6 +1338,7 @@ class RoleBasedRunner(object):
                 capture_rate=capture_rate,
                 capture_steps=capture_steps,
                 alive_rate=float(eval_metrics["alive_rate"]),
+                max_escape_gap_angle=float(max_escape_gap_angle),
                 captured_episodes=captured_episodes,
                 total_eval_episodes=total_eval_episodes,
             )
@@ -1301,6 +1351,7 @@ class RoleBasedRunner(object):
                     capture_rate=float(grouped_metrics["capture_rate"]),
                     capture_steps=float(grouped_metrics["capture_steps"]),
                     alive_rate=float(grouped_metrics["alive_rate"]),
+                    max_escape_gap_angle=float("nan"),
                     captured_episodes=int(grouped_metrics["captured_episodes"]),
                     total_eval_episodes=int(grouped_metrics["total_eval_episodes"]),
                 )
@@ -1511,6 +1562,7 @@ class RoleBasedRunner(object):
                     "capture_rate",
                     "capture_steps",
                     "alive_rate",
+                    "max_escape_gap_angle",
                     "captured_episodes",
                     "total_eval_episodes",
                 ]
@@ -1563,6 +1615,7 @@ class RoleBasedRunner(object):
         capture_rate,
         capture_steps,
         alive_rate,
+        max_escape_gap_angle,
         captured_episodes,
         total_eval_episodes,
     ):
@@ -1576,6 +1629,7 @@ class RoleBasedRunner(object):
             capture_rate (float): 捕获成功率。
             capture_steps (float): 平均捕获步数（仅成功episode）。
             alive_rate (float): 终止时hunter平均存活率（按激活hunter归一化）。
+            max_escape_gap_angle (float): 最大潜在可逃脱空间夹角均值（弧度）。
             captured_episodes (int): 捕获成功episode数。
             total_eval_episodes (int): 评估episode总数。
         输出:
@@ -1593,6 +1647,7 @@ class RoleBasedRunner(object):
                     float(capture_rate),
                     float(capture_steps),
                     float(alive_rate),
+                    float(max_escape_gap_angle),
                     int(captured_episodes),
                     int(total_eval_episodes),
                 ]

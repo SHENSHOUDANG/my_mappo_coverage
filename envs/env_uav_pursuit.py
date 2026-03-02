@@ -22,6 +22,7 @@ if os.environ.get("DISPLAY", "") == "" and os.environ.get("MPLBACKEND") is None:
     matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib.patches import Wedge
 
 
 def _safe_distance_penalty(
@@ -250,6 +251,7 @@ class HunterAgent(BaseAgent):
         min_turn_limit_velo: float = 0.0,
         policy_type: str = "learn",
         policy_net=None,
+        block_length: float = 0.0,
     ):
         """
         功能:
@@ -264,6 +266,7 @@ class HunterAgent(BaseAgent):
             min_turn_limit_velo (float): 速度超过该阈值时才启用转角限制（米/秒）。
             policy_type (str): 策略类型。
             policy_net (Any): 可选策略网络。
+            block_length (float): 围捕建模的单侧拦截长度（米）。
         输出:
             无。
         """
@@ -279,6 +282,49 @@ class HunterAgent(BaseAgent):
             policy_type=policy_type,
             policy_net=policy_net,
         )
+        self.block_length = float(max(0.0, block_length))
+
+    def compute_intercept_angle_range(self, target_position: np.ndarray):
+        """
+        功能:
+            基于Target位置计算当前Hunter在Target视角下的拦截角区间。
+        输入:
+            target_position (np.ndarray): Target位置，shape=(2,)。
+        输出:
+            Optional[tuple[float, float, float]]: (中心角, 半宽角, 距离)；无效时返回None。
+        """
+        if (not bool(self.alive)) or float(self.block_length) <= 0.0:
+            return None
+        target_pos = np.asarray(target_position, dtype=np.float32)
+        rel = np.asarray(self.position, dtype=np.float32) - target_pos
+        dist = float(np.linalg.norm(rel))
+        if dist <= 1e-6:
+            return None
+        center_angle = float(np.arctan2(rel[1], rel[0]))
+        half_angle = float(np.arctan(float(self.block_length) / max(dist, 1e-6)))
+        return center_angle, half_angle, dist
+
+    def compute_intercept_segment(self, target_position: np.ndarray):
+        """
+        功能:
+            计算围捕可视化用的拦截线段端点（过Hunter并垂直于target->hunter方向）。
+        输入:
+            target_position (np.ndarray): Target位置，shape=(2,)。
+        输出:
+            Optional[tuple[np.ndarray, np.ndarray]]: 两个端点；无效时返回None。
+        """
+        if (not bool(self.alive)) or float(self.block_length) <= 0.0:
+            return None
+        target_pos = np.asarray(target_position, dtype=np.float32)
+        rel = np.asarray(self.position, dtype=np.float32) - target_pos
+        dist = float(np.linalg.norm(rel))
+        if dist <= 1e-6:
+            return None
+        rel_dir = rel / dist
+        perp_dir = np.array([-rel_dir[1], rel_dir[0]], dtype=np.float32)
+        p1 = np.asarray(self.position, dtype=np.float32) + perp_dir * float(self.block_length)
+        p2 = np.asarray(self.position, dtype=np.float32) - perp_dir * float(self.block_length)
+        return p1.astype(np.float32), p2.astype(np.float32)
 
 
 class ExplorerAgent(BaseAgent):
@@ -342,6 +388,10 @@ class TargetAgent(BaseAgent):
         switch_interval: int = 1,
         control_dt: float = 1.0,
         world_size: float = 1.0,
+        escape_dis: float = 0.0,
+        escape_gap_angle_bins: int = 360,
+        escape_gap_reward_scale: float = 0.0,
+        escape_gap_min_speed: float = 0.2,
     ):
         """
         功能:
@@ -362,6 +412,10 @@ class TargetAgent(BaseAgent):
             switch_interval (int): 路线切换间隔（按episode计）。
             control_dt (float): 环境控制步长dt（秒），用于patrol速度缩放。
             world_size (float): 地图半边长（米），用于random策略边界修正。
+            escape_dis (float): 围捕分析半径（米）。
+            escape_gap_angle_bins (int): 360度离散角bins数量。
+            escape_gap_reward_scale (float): escape_gap_reward奖励缩放系数。
+            escape_gap_min_speed (float): 计算逃脱方向奖励的最低Target速度阈值（米/秒）。
         输出:
             无。
         """
@@ -385,9 +439,20 @@ class TargetAgent(BaseAgent):
         self.switch_interval = max(1, int(switch_interval))
         self.control_dt = float(max(1e-6, control_dt))
         self.world_size = float(max(1e-6, world_size))
+        self.escape_dis = float(max(0.0, escape_dis))
+        self.escape_gap_angle_bins = int(max(16, escape_gap_angle_bins))
+        self.escape_gap_reward_scale = float(max(0.0, escape_gap_reward_scale))
+        self.escape_gap_min_speed = float(max(0.0, escape_gap_min_speed))
         self.route_episode_count = 0
         self.route_index = 0
         self.patrol_index = 0
+        self.max_escape_gap_angle = 0.0
+        self.max_escape_gap_center_angle = 0.0
+        self.max_escape_gap_start_angle = 0.0
+        self.max_escape_gap_end_angle = 0.0
+        self.escape_gap_metric_valid = False
+        self.last_escape_gap_blocked_mask = np.zeros(self.escape_gap_angle_bins, dtype=bool)
+        self.last_encircling_hunter_ids = []
 
     def reset(
         self,
@@ -406,6 +471,13 @@ class TargetAgent(BaseAgent):
             无。
         """
         super().reset(init_pos)
+        self.max_escape_gap_angle = 0.0
+        self.max_escape_gap_center_angle = 0.0
+        self.max_escape_gap_start_angle = 0.0
+        self.max_escape_gap_end_angle = 0.0
+        self.escape_gap_metric_valid = False
+        self.last_escape_gap_blocked_mask = np.zeros(self.escape_gap_angle_bins, dtype=bool)
+        self.last_encircling_hunter_ids = []
         if force_route_episode_count is not None:
             self.route_episode_count = int(force_route_episode_count)
         else:
@@ -539,6 +611,189 @@ class TargetAgent(BaseAgent):
         # Step 6: 其他模式回退为单位方向
         return direction
 
+    @staticmethod
+    def _wrap_angle(angle_rad: float) -> float:
+        """
+        功能:
+            将角度归一化到[-pi, pi]区间。
+        输入:
+            angle_rad (float): 原始角度（弧度）。
+        输出:
+            float: 归一化后角度（弧度）。
+        """
+        return float(np.arctan2(np.sin(float(angle_rad)), np.cos(float(angle_rad))))
+
+    def compute_max_escape_gap(self, hunters: List[HunterAgent], active_hunter_mask: np.ndarray):
+        """
+        功能:
+            计算Target周围最大潜在可逃脱空间夹角，并更新内部缓存供reward/render调用。
+        输入:
+            hunters (List[HunterAgent]): Hunter列表。
+            active_hunter_mask (np.ndarray): Hunter激活掩码，shape=(num_hunters,)。
+        输出:
+            dict: 包含metric_valid、active_alive_hunters、encircling_hunters、max_gap_angle等信息。
+        """
+        self.max_escape_gap_angle = 0.0
+        self.max_escape_gap_center_angle = 0.0
+        self.max_escape_gap_start_angle = 0.0
+        self.max_escape_gap_end_angle = 0.0
+        self.escape_gap_metric_valid = False
+        self.last_escape_gap_blocked_mask = np.zeros(self.escape_gap_angle_bins, dtype=bool)
+        self.last_encircling_hunter_ids = []
+
+        if not bool(self.alive):
+            return {
+                "metric_valid": False,
+                "active_alive_hunters": 0,
+                "encircling_hunters": 0,
+                "max_gap_angle": 0.0,
+                "max_gap_center_angle": 0.0,
+                "max_gap_start_angle": 0.0,
+                "max_gap_end_angle": 0.0,
+                "encircling_hunter_ids": [],
+            }
+
+        # Step 1: 统计active且alive的Hunter数量（<=1时不参与指标统计）
+        active_alive_hunters = 0
+        for hid, hunter in enumerate(hunters):
+            is_active = bool(active_hunter_mask[hid]) if hid < len(active_hunter_mask) else True
+            if is_active and bool(hunter.alive):
+                active_alive_hunters += 1
+        if active_alive_hunters <= 1:
+            return {
+                "metric_valid": False,
+                "active_alive_hunters": int(active_alive_hunters),
+                "encircling_hunters": 0,
+                "max_gap_angle": 0.0,
+                "max_gap_center_angle": 0.0,
+                "max_gap_start_angle": 0.0,
+                "max_gap_end_angle": 0.0,
+                "encircling_hunter_ids": [],
+            }
+
+        # Step 2: 筛选escape_dis内围捕Hunter并构造角覆盖区间
+        angle_centers = []
+        angle_halves = []
+        encircling_hunter_ids = []
+        for hid, hunter in enumerate(hunters):
+            is_active = bool(active_hunter_mask[hid]) if hid < len(active_hunter_mask) else True
+            if (not is_active) or (not bool(hunter.alive)):
+                continue
+            rel = np.asarray(hunter.position, dtype=np.float32) - np.asarray(self.position, dtype=np.float32)
+            dist = float(np.linalg.norm(rel))
+            if float(self.escape_dis) > 0.0 and dist > float(self.escape_dis):
+                continue
+            angle_info = hunter.compute_intercept_angle_range(np.asarray(self.position, dtype=np.float32))
+            if angle_info is None:
+                continue
+            center_angle, half_angle, _ = angle_info
+            angle_centers.append(float(center_angle))
+            angle_halves.append(float(max(0.0, half_angle)))
+            encircling_hunter_ids.append(int(hid))
+
+        self.last_encircling_hunter_ids = list(encircling_hunter_ids)
+        bins = int(max(16, self.escape_gap_angle_bins))
+        bin_width = float(2.0 * np.pi / bins)
+        angle_grid = -np.pi + np.arange(bins, dtype=np.float32) * np.float32(bin_width)
+        blocked_mask = np.zeros(bins, dtype=bool)
+        for center_angle, half_angle in zip(angle_centers, angle_halves):
+            if half_angle <= 0.0:
+                continue
+            delta = np.arctan2(
+                np.sin(angle_grid - np.float32(center_angle)),
+                np.cos(angle_grid - np.float32(center_angle)),
+            )
+            blocked_mask |= np.abs(delta) <= np.float32(half_angle)
+        self.last_escape_gap_blocked_mask = blocked_mask.copy()
+
+        # Step 3: 在环形离散空间中搜索最长连续未阻塞区间
+        if np.all(blocked_mask):
+            best_len = 0
+            best_start = 0
+        elif not np.any(blocked_mask):
+            best_len = bins
+            best_start = 0
+        else:
+            doubled = np.concatenate([blocked_mask, blocked_mask], axis=0)
+            best_len = 0
+            best_start = 0
+            run_len = 0
+            run_start = 0
+            for idx, is_blocked in enumerate(doubled):
+                if not bool(is_blocked):
+                    if run_len == 0:
+                        run_start = idx
+                    run_len += 1
+                    candidate_len = min(run_len, bins)
+                    if candidate_len > best_len:
+                        best_len = int(candidate_len)
+                        best_start = int(run_start)
+                else:
+                    run_len = 0
+            best_start = int(best_start % bins)
+
+        max_gap_angle = float(best_len * bin_width)
+        max_gap_start_angle = float(-np.pi + best_start * bin_width)
+        max_gap_center_angle = self._wrap_angle(max_gap_start_angle + 0.5 * max_gap_angle)
+        max_gap_end_angle = self._wrap_angle(max_gap_start_angle + max_gap_angle)
+
+        self.max_escape_gap_angle = float(max_gap_angle)
+        self.max_escape_gap_center_angle = float(max_gap_center_angle)
+        self.max_escape_gap_start_angle = self._wrap_angle(max_gap_start_angle)
+        self.max_escape_gap_end_angle = float(max_gap_end_angle)
+        self.escape_gap_metric_valid = True
+        return {
+            "metric_valid": True,
+            "active_alive_hunters": int(active_alive_hunters),
+            "encircling_hunters": int(len(encircling_hunter_ids)),
+            "max_gap_angle": float(self.max_escape_gap_angle),
+            "max_gap_center_angle": float(self.max_escape_gap_center_angle),
+            "max_gap_start_angle": float(self.max_escape_gap_start_angle),
+            "max_gap_end_angle": float(self.max_escape_gap_end_angle),
+            "encircling_hunter_ids": list(encircling_hunter_ids),
+        }
+
+    def compute_escape_gap_reward(self, hunters: List[HunterAgent], active_hunter_mask: np.ndarray):
+        """
+        功能:
+            计算escape_gap_reward（仅鼓励项），并返回应分配奖励的围捕Hunter索引。
+        输入:
+            hunters (List[HunterAgent]): Hunter列表。
+            active_hunter_mask (np.ndarray): Hunter激活掩码，shape=(num_hunters,)。
+        输出:
+            tuple[float, List[int], dict]: (奖励值, 奖励接收Hunter索引, 诊断信息)。
+        """
+        gap_info = self.compute_max_escape_gap(hunters, active_hunter_mask)
+        if (not bool(gap_info.get("metric_valid", False))) or int(gap_info.get("active_alive_hunters", 0)) <= 1:
+            return 0.0, [], gap_info
+        encircling_hunter_ids = list(gap_info.get("encircling_hunter_ids", []))
+        if len(encircling_hunter_ids) <= 1:
+            return 0.0, [], gap_info
+
+        # Step 1: Target速度过小时，不计算运动方向，也不计算该reward。
+        speed = float(np.linalg.norm(np.asarray(self.velocity, dtype=np.float32)))
+        if speed < float(self.escape_gap_min_speed):
+            return 0.0, encircling_hunter_ids, gap_info
+
+        max_gap_angle = float(gap_info.get("max_gap_angle", 0.0))
+        if max_gap_angle <= 1e-6:
+            return 0.0, encircling_hunter_ids, gap_info
+
+        # Step 2: 方向鼓励（在最大潜在可逃脱空间扇区内，越靠中心奖励越高）
+        target_move_angle = float(np.arctan2(float(self.velocity[1]), float(self.velocity[0])))
+        gap_center = float(gap_info.get("max_gap_center_angle", 0.0))
+        half_gap = 0.5 * max_gap_angle
+        angle_delta = abs(self._wrap_angle(target_move_angle - gap_center))
+        if angle_delta > half_gap:
+            direction_score = 0.0
+        else:
+            direction_score = 1.0 - float(angle_delta / max(half_gap, 1e-6))
+
+        # Step 3: 围捕质量分（最大逃脱夹角越小越好）
+        encircle_score = 1.0 - float(np.clip(max_gap_angle / (2.0 * np.pi), 0.0, 1.0))
+        reward_value = float(self.escape_gap_reward_scale) * float(max(0.0, encircle_score * direction_score))
+        return reward_value, encircling_hunter_ids, gap_info
+
 
 class UAVPursuitEnv(object):
     def __init__(self, config):
@@ -600,6 +855,15 @@ class UAVPursuitEnv(object):
         self.hunter_capture_reward = float(reward_cfg.hunter_capture_reward)
         self.target_captured_penalty = float(reward_cfg.target_captured_penalty)
         self.target_collision_penalty = float(reward_cfg.target_collision_penalty)
+        escape_block_scale = float(max(0.0, getattr(reward_cfg, "escape_block_scale", 1.0)))
+        escape_block_length = float(max(0.0, self.capture_dis * escape_block_scale))
+        escape_gap_enable = bool(getattr(reward_cfg, "escape_gap_enable", True))
+        escape_gap_reward_scale = float(max(0.0, getattr(reward_cfg, "escape_gap_reward_scale", 0.0)))
+        if not escape_gap_enable:
+            escape_gap_reward_scale = 0.0
+        escape_radius = float(max(0.0, getattr(reward_cfg, "escape_radius", self.capture_dis)))
+        escape_gap_angle_bins = int(max(16, int(getattr(reward_cfg, "escape_gap_angle_bins", 360))))
+        escape_gap_min_speed = float(max(0.0, getattr(reward_cfg, "escape_gap_min_speed", 0.2)))
 
         # 步骤3：初始化运行时状态缓存
         self.rng = np.random.RandomState()
@@ -649,6 +913,7 @@ class UAVPursuitEnv(object):
                 max_turn_angle=float(hunter_cfg.max_turn_angle),
                 min_turn_limit_velo=float(hunter_cfg.min_turn_limit_velo),
                 policy_type="learn",
+                block_length=float(escape_block_length),
             )
             for i in range(self.num_hunters)
         ]
@@ -667,6 +932,10 @@ class UAVPursuitEnv(object):
             switch_interval=max(1, self.target_switch_interval),
             control_dt=float(self.dt),
             world_size=float(self.world_size),
+            escape_dis=float(escape_radius),
+            escape_gap_angle_bins=int(escape_gap_angle_bins),
+            escape_gap_reward_scale=float(escape_gap_reward_scale),
+            escape_gap_min_speed=float(escape_gap_min_speed),
         )
         self.patrol_routes = patrol_routes
         self.default_target_policy_source = str(self.target_policy_source)
@@ -1040,6 +1309,10 @@ class UAVPursuitEnv(object):
                 "reward_hunter_streak": float(reward_terms["hunter_streak_reward"][i]),
                 "reward_target_streak": float(reward_terms["target_streak_reward"][i]),
                 "reward_capture": float(reward_terms["capture_reward"][i]),
+                "reward_escape_gap": float(reward_terms["escape_gap_reward"][i]),
+                "max_escape_gap_angle": float(self.target.max_escape_gap_angle),
+                "max_escape_gap_center_angle": float(self.target.max_escape_gap_center_angle),
+                "max_escape_gap_metric_valid": bool(self.target.escape_gap_metric_valid),
                 "active_agent": bool(
                     True if a.role != "hunter" else self.active_hunter_mask[int(i)]
                 ),
@@ -1249,7 +1522,59 @@ class UAVPursuitEnv(object):
                         alpha=0.45 if alive else 0.2,
                     )
 
-        # Step 6: 绘制Pursuit组接收到的Target位置（共享记忆）
+        # Step 6: 绘制围捕几何（escape_radius、拦截区间、最大可逃脱扇区）
+        gap_info = self.target.compute_max_escape_gap(self.hunters, self.active_hunter_mask)
+        if bool(gap_info.get("metric_valid", False)) and int(gap_info.get("active_alive_hunters", 0)) > 1:
+            target_pos = np.asarray(self.target.position, dtype=np.float32)
+            escape_dis = float(max(0.0, self.target.escape_dis))
+            if escape_dis > 0.0:
+                ax.add_patch(
+                    plt.Circle(
+                        (float(target_pos[0]), float(target_pos[1])),
+                        escape_dis,
+                        color="#ff9896",
+                        fill=False,
+                        linestyle="-",
+                        linewidth=1.0,
+                        alpha=0.50,
+                    )
+                )
+
+            for hid in list(gap_info.get("encircling_hunter_ids", [])):
+                if hid < 0 or hid >= self.num_hunters:
+                    continue
+                segment = self.hunters[hid].compute_intercept_segment(target_pos)
+                if segment is None:
+                    continue
+                p1, p2 = segment
+                ax.plot(
+                    [float(p1[0]), float(p2[0])],
+                    [float(p1[1]), float(p2[1])],
+                    color="#ff7f0e",
+                    linestyle="-",
+                    linewidth=1.4,
+                    alpha=0.75,
+                )
+
+            max_gap_angle = float(gap_info.get("max_gap_angle", 0.0))
+            if escape_dis > 0.0 and max_gap_angle > 1e-6:
+                start_rad = float(gap_info.get("max_gap_start_angle", 0.0))
+                theta1_deg = float(np.degrees(start_rad))
+                theta2_deg = float(theta1_deg + np.degrees(max_gap_angle))
+                ax.add_patch(
+                    Wedge(
+                        center=(float(target_pos[0]), float(target_pos[1])),
+                        r=escape_dis,
+                        theta1=theta1_deg,
+                        theta2=theta2_deg,
+                        facecolor="#ff9896",
+                        edgecolor="#d62728",
+                        linewidth=1.0,
+                        alpha=0.22,
+                    )
+                )
+
+        # Step 7: 绘制Pursuit组接收到的Target位置（共享记忆）
         if self.shared_target_valid:
             shared_pos = np.asarray(self.shared_target_pos, dtype=np.float32)
             ax.scatter(
@@ -1276,7 +1601,7 @@ class UAVPursuitEnv(object):
                     alpha=0.25,
                 )
 
-        # Step 7: 绘制碰撞/抓捕事件提示
+        # Step 8: 绘制碰撞/抓捕事件提示
         if self.last_target_collided:
             tp = np.asarray(self.target.position, dtype=np.float32)
             ax.scatter([tp[0]], [tp[1]], c=["black"], marker="X", s=120, alpha=0.95)
@@ -1314,7 +1639,7 @@ class UAVPursuitEnv(object):
             )
             ax.text(p[0], p[1], " BND", fontsize=7, color="#8c564b")
 
-        # Step 8: 绘制图例
+        # Step 9: 绘制图例
         legend_handles = []
         for hid in range(self.num_hunters):
             if not bool(self.active_hunter_mask[hid]):
@@ -1352,6 +1677,9 @@ class UAVPursuitEnv(object):
                 Line2D([0], [0], color="#1f77b4", lw=1.8, marker=">", markersize=6, label="Velocity Vector"),
                 Line2D([0], [0], color="#1f77b4", lw=1.0, linestyle="--", label="Turn Limit"),
                 Line2D([0], [0], color="#9467bd", lw=1.4, linestyle="-", label="Patrol Route"),
+                Line2D([0], [0], color="#ff9896", lw=1.0, linestyle="-", label="Escape Radius"),
+                Line2D([0], [0], color="#ff7f0e", lw=1.4, linestyle="-", label="Intercept Segment"),
+                Line2D([0], [0], color="#d62728", lw=1.0, linestyle="-", label="Max Escape Gap"),
                 Line2D([0], [0], marker="*", color="w", markerfacecolor="#e377c2", markeredgecolor="black", markersize=9, label="Shared Target Pos"),
                 Line2D([0], [0], marker="*", color="w", markerfacecolor="gold", markeredgecolor="black", markersize=9, label="Capture Event"),
                 Line2D([0], [0], marker="X", color="w", markerfacecolor="black", markeredgecolor="black", markersize=8, label="Collision Event"),
@@ -1368,7 +1696,7 @@ class UAVPursuitEnv(object):
         )
         fig.subplots_adjust(right=0.72)
 
-        # Step 9: 返回RGB数组或直接展示
+        # Step 10: 返回RGB数组或直接展示
         if mode == "human":
             plt.show(block=False)
             plt.pause(0.001)
@@ -1588,6 +1916,7 @@ class UAVPursuitEnv(object):
         hunter_streak_reward = np.zeros(self.agent_num, dtype=np.float32)
         target_streak_reward = np.zeros(self.agent_num, dtype=np.float32)
         capture_reward = np.zeros(self.agent_num, dtype=np.float32)
+        escape_gap_reward = np.zeros(self.agent_num, dtype=np.float32)
 
         dist_scale = max(float(self.world_size), 1e-6)
         capture_dis_safe = max(float(self.capture_dis), 1e-6)
@@ -1635,7 +1964,20 @@ class UAVPursuitEnv(object):
         if captured:
             capture_reward[self.target_index] = -self.target_captured_penalty
 
-        # Step 2: 归一化速度线性惩罚，避免数值爆炸
+        # Step 2: escape_gap_reward（仅奖励Hunter；Target不加不减）
+        gap_reward_value, gap_hunter_ids, _ = self.target.compute_escape_gap_reward(
+            hunters=self.hunters,
+            active_hunter_mask=self.active_hunter_mask,
+        )
+        if gap_reward_value > 0.0 and len(gap_hunter_ids) > 0:
+            for hid in gap_hunter_ids:
+                if hid < 0 or hid >= self.num_hunters:
+                    continue
+                if (not bool(self.active_hunter_mask[hid])) or (not bool(self.hunters[hid].alive)):
+                    continue
+                escape_gap_reward[int(hid)] = float(gap_reward_value)
+
+        # Step 3: 归一化速度线性惩罚，避免数值爆炸
         speed_penalty_vals = []
         for a in self.agents:
             vmax = max(float(a.max_speed), 1e-6)
@@ -1643,13 +1985,14 @@ class UAVPursuitEnv(object):
             speed_penalty_vals.append(speed_norm)
         speed_penalty_reward = -self.speed_penalty * np.asarray(speed_penalty_vals, dtype=np.float32)
 
-        # Step 3: 聚合总奖励与子项
+        # Step 4: 聚合总奖励与子项
         total = (
             hunter_base_reward
             + target_base_reward
             + hunter_streak_reward
             + target_streak_reward
             + capture_reward
+            + escape_gap_reward
             + collision_rewards
             + speed_penalty_reward
         ).astype(np.float32)
@@ -1660,6 +2003,7 @@ class UAVPursuitEnv(object):
             "hunter_streak_reward": hunter_streak_reward.astype(np.float32),
             "target_streak_reward": target_streak_reward.astype(np.float32),
             "capture_reward": capture_reward.astype(np.float32),
+            "escape_gap_reward": escape_gap_reward.astype(np.float32),
             "collision_reward": collision_rewards.astype(np.float32),
             "speed_penalty_reward": speed_penalty_reward.astype(np.float32),
         }

@@ -1,6 +1,6 @@
 exp:
   algorithm_name: rmappo
-  experiment_name: acc5v1_learn_Eval-h8
+  experiment_name: acc5v1_patrol_Eval-h8
   seed: 1
   cuda: true
   cuda_deterministic: true
@@ -12,7 +12,7 @@ exp:
 
 # Environment settings (common)
 env:
-  env_name: Hunter_colli
+  env_name: Pursuit
   world_size: 100
   episode_length: 400 # max steps per episode
   dt: 0.1
@@ -30,14 +30,14 @@ env:
   noisy_target_pos_std: 2  # max error percent
   noisy_target_vel_std: 10  # 
 
-  target_policy_source: learn # Choices: ["learn", "patrol", "Random"]
+  target_policy_source: patrol # Choices: ["learn", "patrol", "Random"]
   target_patrol_path: datasets/patrol_routes.json
   target_patrol_names: ["all"]
   target_switch_interval: 10
 
 Hunter:
   perception_radius: -1
-  max_velo: 10
+  max_velo: 20
   safe_dis: 15
   control_mode: acceleration  # Choices: ["acceleration", "velocity"]
   max_acc: 5
@@ -46,12 +46,12 @@ Hunter:
 
 Explorer:
   perception_radius: -1
-  max_velo: 10
+  max_velo: 20
   safe_dis: 15
 
 Target: 
   perception_radius: -1
-  max_velo: 10
+  max_velo: 20
   safe_dis: 15
   control_mode: acceleration
   max_acc: 5
@@ -125,7 +125,7 @@ schedule:
   use_linear_lr_decay: false
 
 logging:
-  log_gif: true         # 训练阶段是否按规则保存GIF
+  log_gif: false         # 训练阶段是否按规则保存GIF
 
 eval:
   eval_episode_length: 600

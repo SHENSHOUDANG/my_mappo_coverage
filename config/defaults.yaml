@@ -76,6 +76,14 @@ reward:
 
   # Speed Penalty
   speed_penalty: 0.02
+
+  # Escape-gap encirclement reward
+  escape_gap_enable: true
+  escape_gap_reward_scale: 0.2
+  escape_radius: 35.0
+  escape_block_scale: 0.7
+  escape_gap_angle_bins: 360
+  escape_gap_min_speed: 0.2
   
   # Explorer Penalty
   lost_target_penalty: 0.1
