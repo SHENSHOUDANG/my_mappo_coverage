@@ -1,71 +1,36 @@
 exp:
   algorithm_name: rmappo
-  experiment_name: Zone_escape_vel5v1_Eval-h8
+  experiment_name: acc5v1_BaseZone
   seed: 1
-  cuda: true
-  cuda_deterministic: true
-  n_training_threads: 4
-  n_rollout_threads: 5
-  n_eval_rollout_threads: 10
-  n_render_rollout_threads: 1
   num_env_steps: 2000000 # total environment steps to train
 
 # Environment settings (common)
 env:
-  env_name: Pursuit
+  env_name: Pursuit-Zone
   world_size: 200
   episode_length: 400 # max steps per episode
-  dt: 0.1
   max_hunters_num: 5
   hunters_in_zone: true
 
-  num_explorers: 0
   neighbor_N: 3
 
-  capture_dis: 20
-  capture_step: 10
-
-  collision_dis: 3
-  
-  target_pos_init_guidance_step: 10
-  target_pos_guidance: true
-  noisy_target_pos_std: 2  # max error percent
-  noisy_target_vel_std: 10  # 
-
   target_policy_source: learn # Choices: ["learn", "patrol", "Random"]
-  target_patrol_path: datasets/patrol_routes.json
-  target_patrol_names: ["all"]
   target_switch_interval: 10
 
 Hunter:
   perception_radius: -1
-  max_velo: 20
-  safe_dis: 15
-  control_mode: velocity  # Choices: ["acceleration", "velocity"]
-  max_acc: 5
-  max_turn_angle: 10
-  min_turn_limit_velo: 3.0
-
-Explorer:
-  perception_radius: -1
-  max_velo: 20
-  safe_dis: 15
+  control_mode: acceleration  # Choices: ["acceleration", "velocity"]
 
 Target: 
   perception_radius: -1
-  max_velo: 20
-  safe_dis: 15
-  control_mode: velocity
-  max_acc: 5
-  max_turn_angle: 20
-  min_turn_limit_velo: 3.0
+  control_mode: acceleration
 
 # UAV pursuit scenario settings
 reward:
   # Collision Penalty
   target_collision_penalty: 30.0
-  collision_penalty_k: 20.0
-  collision_penalty_cap: 200.0
+  collision_penalty_k: 5.0
+  collision_penalty_cap: 20.0
   safe_zone_penalty_scale: 0.1
   
   # Base chase reward
@@ -75,7 +40,7 @@ reward:
   base_streak_cap: 30
 
   # Escape Gap
-  escape_gap_enable: true
+  escape_gap_enable: false
   escape_gap_hunter_reward_scale: 1.0
   escape_gap_target_reward_scale: 0.3
   escape_radius: 35.0
@@ -86,21 +51,14 @@ reward:
 
   # Speed Penalty
   speed_penalty: 0.02
-  
-  # Explorer Penalty
-  lost_target_penalty: 0.1
-  lost_target_penalty_age_scale: 0.02
-
 
 # Model/network settings
 model:
   policy_share: true # whether all agents share the same policy
-  use_centralized_V: true # centralized value function
   hidden_size: 64
   layer_N: 1
-  use_naive_recurrent_policy: false
   use_recurrent_policy: true
-  data_chunk_length: 10
+
 
 # Optimizer settings
 optim:
@@ -109,35 +67,15 @@ optim:
   opti_eps: 0.00001
   weight_decay: 0
 
-# PPO settings
-ppo:
-  ppo_epoch: 15
-  use_clipped_value_loss: true
-  clip_param: 0.2
-  num_mini_batch: 1
-  entropy_coef: 0.01
-  value_loss_coef: 1
-  use_max_grad_norm: true
-  max_grad_norm: 10.0
-  use_gae: true
-  gamma: 0.99
-  gae_lambda: 0.95
-  use_proper_time_limits: false
-  use_huber_loss: true
-  use_value_active_masks: true
-  use_policy_active_masks: true
-  huber_delta: 10.0
-
 # Learning rate schedule
 schedule:
-  use_linear_lr_decay: false
+  use_linear_lr_decay: true
 
 logging:
   log_gif: true         # 训练阶段是否按规则保存GIF
 
 eval:
   eval_episode_length: 600
-  fixed_tasks: []
   fixed_tasks_file: config/eval_tasks/patrol_tasks_h8_n100.yaml
 
 domain_randomization:

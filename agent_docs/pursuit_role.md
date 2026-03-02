@@ -72,6 +72,7 @@
 - `hunter_streak_reward`
 - `target_streak_reward`
 - `capture_reward`
+- `escape_gap_reward`（= `reward_escape_gap_hunter + reward_escape_gap_target`）
 - `collision_reward`
 - `speed_penalty_reward`
 
@@ -82,6 +83,20 @@
 - 捕获瞬间 Hunter 得到 `hunter_capture_reward`，Target 受到 `target_captured_penalty`。
 - 碰撞惩罚包含安全区线性惩罚与硬碰撞惩罚，并受 `collision_penalty_cap` 截断。
 - 所有 agent 有归一化速度惩罚：`-speed_penalty * (||v|| / max_speed)`。
+
+### 6.1 围捕几何奖励（escape-gap）
+- 在 Target 周围 `escape_radius` 内筛选围捕 Hunter；
+- 每个 Hunter 使用 `block_length = capture_dis * escape_block_scale` 构造角覆盖区间；
+- 在离散角 bins（`escape_gap_angle_bins`）上生成 blocked mask，并计算最大未阻塞扇区（`max_escape_gap_angle`）；
+- 速度门限：当 `||v_target|| < escape_gap_min_speed` 时，本项方向奖励不计算；
+- 方向激励：
+  - Hunter 侧：鼓励 Target 运动方向与缺口中心方向相反；
+  - Target 侧：鼓励 Target 朝缺口中心方向运动。
+
+诊断字段（info）包含：
+- `max_escape_gap_angle`, `max_escape_gap_center_angle`, `max_escape_gap_metric_valid`
+- `escape_gap_encircle_score`, `escape_gap_open_score`
+- `escape_gap_hunter_direction_score`, `escape_gap_target_direction_score`
 
 ## 7. reset 模式与任务规格
 环境 `reset(mode, task_spec)` 支持：
@@ -97,6 +112,21 @@
 - `target_patrol_names`
 - `target_route_id`
 - `seed`
+
+### 7.1 初始位置采样增强
+- 默认：全图均匀随机采样。
+- 初始捕获保护：若 Target 初始 `capture_dis` 内存在 active Hunter，则重采样（最多10次）。
+- `hunters_in_zone=true` 时：
+  - 先按 `m=ceil(sqrt(max_hunters_num))` 生成 `m*m` 方阵槽位；
+  - 槽位间距采用 `hunter_zone_spacing = max(collision_dis*3, Hunter.safe_dis)`；
+  - 阵列中心每次 reset 在地图内随机采样（非固定地图中心）；
+  - 每次 reset 都随机重排 Hunter 与槽位映射。
+- `target_avoid_hunter_zone=true` 时：
+  - Target 初始位置与 Hunter zone 中心至少保持 `target_hunter_zone_min_dis`；
+  - 不满足时重采样（最多10次）。
+- `recover` 模式：
+  - reset 前会重置随机种子；
+  - 在同任务条件下，随机槽位映射与初始位置结果保持可复现。
 
 ## 8. train/train.py 训练与评估流程
 `train/train.py` 的核心实现：
@@ -115,6 +145,7 @@
   - `eval.fixed_tasks`（内联）或
   - `eval.fixed_tasks_file`（yaml/json，推荐）。
 - 当 `target_policy_source=learn` 时，会额外创建 `target_learn` 评估桶并记录独立指标。
+- 评估指标新增 `max_escape_gap_angle`（当有效 Hunter 数<=1时不纳入统计）。
 
 ## 10. 训练产物
 默认输出目录：

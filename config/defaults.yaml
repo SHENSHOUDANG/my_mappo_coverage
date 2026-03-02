@@ -18,6 +18,9 @@ env:
   max_hunters_num: 3
   num_explorers: 0
   neighbor_N: 2
+  hunters_in_zone: false
+  target_avoid_hunter_zone: false
+  target_hunter_zone_min_dis: 30.0
 
   capture_dis: 20
   capture_step: 10
@@ -38,23 +41,23 @@ Hunter:
   perception_radius: -1
   max_velo: 20
   safe_dis: 15
-  control_mode: velocity  # Choices: ["acceleration", "velocity"]
-  max_acc: 8
+  control_mode: acceleration  # Choices: ["acceleration", "velocity"]
+  max_acc: 5
   max_turn_angle: 10
   min_turn_limit_velo: 3.0
 
 Explorer:
   perception_radius: -1
-  max_velo: 10
+  max_velo: 20
   safe_dis: 15
 
 Target: 
   perception_radius: -1
-  max_velo: 12
+  max_velo: 20
   safe_dis: 15
-  control_mode: velocity
-  max_acc: 6
-  max_turn_angle: 10
+  control_mode: acceleration
+  max_acc: 5
+  max_turn_angle: 20
   min_turn_limit_velo: 3.0
 
 reward:

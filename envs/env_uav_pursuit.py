@@ -817,6 +817,11 @@ class TargetAgent(BaseAgent):
         输出:
             tuple[float, float, List[int], dict]: (Hunter奖励值, Target奖励值, 奖励接收Hunter索引, 诊断信息)。
         """
+        ## 不使用escape reward
+        if self.escape_gap_hunter_reward_scale == 0 and self.escape_gap_target_reward_scale == 0:
+            gap_info = self.compute_max_escape_gap([], None)
+            return 0.0, 0.0, [], gap_info
+        
         gap_info = self.compute_max_escape_gap(hunters, active_hunter_mask)
         if (not bool(gap_info.get("metric_valid", False))) or int(gap_info.get("active_alive_hunters", 0)) <= 1:
             return 0.0, 0.0, [], gap_info
@@ -903,6 +908,9 @@ class UAVPursuitEnv(object):
         self.capture_dis = float(env_cfg.capture_dis)
         self.capture_step = int(env_cfg.capture_step)
         self.collision_dis = float(env_cfg.collision_dis)
+        self.hunters_in_zone = bool(env_cfg.hunters_in_zone)
+        self.target_avoid_hunter_zone = bool(env_cfg.target_avoid_hunter_zone)
+        self.target_hunter_zone_min_dis = float(max(0.0, env_cfg.target_hunter_zone_min_dis))
         self.target_pos_init_guidance_step = int(env_cfg.target_pos_init_guidance_step)
         self.target_pos_guidance = bool(env_cfg.target_pos_guidance)
         self.noisy_target_pos_std = float(env_cfg.noisy_target_pos_std)
@@ -935,6 +943,13 @@ class UAVPursuitEnv(object):
         escape_radius = float(max(0.0, reward_cfg.escape_radius))
         escape_gap_angle_bins = int(max(16, int(reward_cfg.escape_gap_angle_bins)))
         escape_gap_min_speed = float(max(0.0, reward_cfg.escape_gap_min_speed))
+        self.hunter_zone_spacing = float(
+            max(self.collision_dis * 3.0, float(hunter_cfg.safe_dis) * 1.2, 1e-6)
+        )
+        self.hunter_zone_offsets = self._build_hunter_zone_offsets(
+            max_hunters_num=int(self.num_hunters),
+            spacing=float(self.hunter_zone_spacing),
+        )
 
         # 步骤3：初始化运行时状态缓存
         self.rng = np.random.RandomState()
@@ -967,6 +982,7 @@ class UAVPursuitEnv(object):
         self.hunter_reward_last = 0.0
         self.target_reward_last = 0.0
         self.active_target_patrol_names = list(env_cfg.target_patrol_names)
+        self.last_reset_mode = "initial"
 
         # 步骤4：初始化Agent对象
         patrol_routes = self._load_patrol_routes(
@@ -1063,6 +1079,7 @@ class UAVPursuitEnv(object):
             List[np.ndarray]: shape=(agent_num, obs_dim)。
         """
         mode_val = str(mode).lower()
+        self.last_reset_mode = str(mode_val)
         if mode_val == "regen":
             sampled_spec = task_spec if task_spec is not None else self._sample_regen_task_spec()
             self._apply_task_spec(sampled_spec, reset_position_rng=True)
@@ -1102,12 +1119,23 @@ class UAVPursuitEnv(object):
         """
         功能:
             使用当前位置随机流采样初始位置并执行reset主逻辑。
+            若Target初始capture_dis范围内存在active Hunter，则最多重采样10次。
         输入:
             无。
         输出:
             List[np.ndarray]: shape=(agent_num, obs_dim)。
         """
-        init_positions = self._sample_initial_positions()
+        # Step 1: 采样初始位置，并做“Target捕获圈内无Hunter”约束重试
+        max_retry = 10
+        init_positions = None
+        for _ in range(max_retry):
+            sampled = self._sample_initial_positions()
+            if self._is_valid_initial_positions(sampled):
+                init_positions = sampled
+                break
+            init_positions = sampled
+
+        # Step 2: 使用最终采样结果执行reset
         return self._reset_to_positions(init_positions)
 
     def _reset_to_positions(self, init_positions: np.ndarray):
@@ -1244,9 +1272,155 @@ class UAVPursuitEnv(object):
         输出:
             np.ndarray: shape=(agent_num,2)。
         """
-        return self.position_rng.uniform(
-            -self.world_size, self.world_size, size=(self.agent_num, 2)
-        ).astype(np.float32)
+        # Step 1: 常规模式下全部agent在全图均匀随机采样。
+        if not bool(self.hunters_in_zone):
+            return self.position_rng.uniform(
+                -self.world_size + self.collision_dis * 2, self.world_size - self.collision_dis * 2, size=(self.agent_num, 2)
+            ).astype(np.float32)
+
+        # Step 2: hunters_in_zone模式下，Hunter采用“固定阵列偏移 + 随机zone中心”。
+        init_positions = np.zeros((self.agent_num, 2), dtype=np.float32)
+        active_ids = [hid for hid in range(self.num_hunters) if bool(self.active_hunter_mask[hid])]
+        active_count = int(max(1, len(active_ids)))
+        total_slots = int(self.hunter_zone_offsets.shape[0])
+
+        # 每次reset都随机重排Hunter与槽位映射；recover通过重置随机种子保证结果可复现。
+        slot_indices = self.position_rng.permutation(total_slots).astype(np.int32)[:active_count]
+
+        zone_center = self._sample_hunter_zone_center(slot_indices=slot_indices)
+        target_pos = self._sample_target_position_with_zone_constraint(zone_center)
+        init_positions[self.target_index] = target_pos
+        for local_idx, hid in enumerate(active_ids):
+            offset_idx = int(slot_indices[local_idx]) if local_idx < len(slot_indices) else 0
+            init_positions[int(hid)] = zone_center + self.hunter_zone_offsets[offset_idx]
+
+        # 非active hunter位置仅用于占位，不影响episode行为。
+        for hid in range(self.num_hunters):
+            if bool(self.active_hunter_mask[hid]):
+                continue
+            init_positions[hid] = zone_center
+
+        ws = float(self.world_size)
+        init_positions[:, 0] = np.clip(init_positions[:, 0], -ws, ws)
+        init_positions[:, 1] = np.clip(init_positions[:, 1], -ws, ws)
+        return init_positions.astype(np.float32)
+
+    def _build_hunter_zone_offsets(self, max_hunters_num: int, spacing: float) -> np.ndarray:
+        """
+        功能:
+            预计算Hunter固定排布阵列的相对偏移（以zone中心为原点）。
+        输入:
+            max_hunters_num (int): 最大Hunter数量。
+            spacing (float): 阵列最小间距（米）。
+        输出:
+            np.ndarray: shape=(m*m,2)，m=ceil(sqrt(max_hunters_num)) 的方阵槽位偏移。
+        """
+        n = int(max(1, max_hunters_num))
+        step = float(max(1e-6, spacing))
+
+        # Step 1: 生成不小于max_hunters_num且最接近的平方槽位数m*m。
+        side = int(np.ceil(np.sqrt(float(n))))
+        slots = int(side * side)
+
+        # Step 2: 构造方阵槽位并以方阵中心为原点。
+        center_shift = 0.5 * float(side - 1)
+        offsets = []
+        for row in range(side):
+            for col in range(side):
+                dx = (float(col) - center_shift) * step
+                dy = (float(row) - center_shift) * step
+                offsets.append((dx, dy))
+        offsets = np.asarray(offsets[:slots], dtype=np.float32)
+
+        # Step 3: 按离中心距离排序，便于不同active数量下优先取紧凑阵型。
+        order = np.argsort(np.asarray([float(x * x + y * y) for x, y in offsets], dtype=np.float32))
+        offsets = offsets[order]
+        return offsets
+
+    def _sample_hunter_zone_center(self, slot_indices: np.ndarray) -> np.ndarray:
+        """
+        功能:
+            在地图内随机采样Hunter阵列中心，保证阵列整体尽量不越界。
+        输入:
+            slot_indices (np.ndarray): 当前active hunters对应的槽位索引。
+        输出:
+            np.ndarray: shape=(2,)，zone中心坐标。
+        """
+        ws = float(self.world_size)
+        if self.hunter_zone_offsets is None or self.hunter_zone_offsets.shape[0] <= 0:
+            return self.position_rng.uniform(-ws, ws, size=(2,)).astype(np.float32)
+
+        # Step 1: 仅根据当前实际使用槽位偏移计算边界余量。
+        if slot_indices is None or len(slot_indices) == 0:
+            used_offsets = self.hunter_zone_offsets[:1]
+        else:
+            safe_idx = np.asarray(slot_indices, dtype=np.int32)
+            safe_idx = np.clip(safe_idx, 0, self.hunter_zone_offsets.shape[0] - 1)
+            used_offsets = self.hunter_zone_offsets[safe_idx]
+        min_x = float(np.min(used_offsets[:, 0]))
+        max_x = float(np.max(used_offsets[:, 0]))
+        min_y = float(np.min(used_offsets[:, 1]))
+        max_y = float(np.max(used_offsets[:, 1]))
+
+        # Step 2: 计算可采样中心区间，若区间退化则回退到原点。
+        low_x = -ws - min_x
+        high_x = ws - max_x
+        low_y = -ws - min_y
+        high_y = ws - max_y
+        if low_x > high_x or low_y > high_y:
+            return np.zeros(2, dtype=np.float32)
+
+        cx = float(self.position_rng.uniform(low_x, high_x))
+        cy = float(self.position_rng.uniform(low_y, high_y))
+        return np.asarray([cx, cy], dtype=np.float32)
+
+    def _sample_target_position_with_zone_constraint(self, zone_center: np.ndarray) -> np.ndarray:
+        """
+        功能:
+            采样Target初始位置；启用约束时，保证与Hunter zone中心距离不小于最小阈值。
+        输入:
+            zone_center (np.ndarray): Hunter阵列中心，shape=(2,)。
+        输出:
+            np.ndarray: Target初始位置，shape=(2,)。
+        """
+        ws = float(self.world_size)
+        if (not bool(self.hunters_in_zone)) or (not bool(self.target_avoid_hunter_zone)):
+            return self.position_rng.uniform(-ws, ws, size=(2,)).astype(np.float32)
+
+        min_dis = float(max(0.0, self.target_hunter_zone_min_dis))
+        max_retry = 10
+        candidate = None
+        for _ in range(max_retry):
+            sampled = self.position_rng.uniform(-ws, ws, size=(2,)).astype(np.float32)
+            candidate = sampled
+            if float(np.linalg.norm(sampled - np.asarray(zone_center, dtype=np.float32))) >= min_dis:
+                return sampled
+        return candidate if candidate is not None else np.zeros(2, dtype=np.float32)
+
+    def _is_valid_initial_positions(self, init_positions: np.ndarray) -> bool:
+        """
+        功能:
+            校验初始位置是否满足“Target的capture_dis范围内无active Hunter”约束。
+        输入:
+            init_positions (np.ndarray): 候选初始位置，shape=(agent_num,2)。
+        输出:
+            bool: True表示满足约束，False表示需要重采样。
+        """
+        # Step 1: 形状保护，异常输入直接判定为无效。
+        if init_positions is None or init_positions.shape != (self.agent_num, 2):
+            return False
+
+        # Step 2: 遍历active Hunter并判断是否落入Target捕获半径。
+        target_pos = np.asarray(init_positions[self.target_index], dtype=np.float32)
+        capture_dis_safe = max(float(self.capture_dis), 0.0)
+        for hid in range(self.num_hunters):
+            if not bool(self.active_hunter_mask[hid]):
+                continue
+            hunter_pos = np.asarray(init_positions[hid], dtype=np.float32)
+            dist = float(np.linalg.norm(hunter_pos - target_pos))
+            if dist <= capture_dis_safe:
+                return False
+        return True
 
     def _sample_regen_task_spec(self):
         """

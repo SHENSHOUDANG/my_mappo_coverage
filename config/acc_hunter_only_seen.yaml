@@ -1,6 +1,6 @@
 exp:
   algorithm_name: rmappo
-  experiment_name: acc5v1_patrol_Eval-h8
+  experiment_name: escape_acc5v1_Eval-h8
   seed: 1
   cuda: true
   cuda_deterministic: true
@@ -13,10 +13,12 @@ exp:
 # Environment settings (common)
 env:
   env_name: Pursuit
-  world_size: 100
+  world_size: 200
   episode_length: 400 # max steps per episode
   dt: 0.1
   max_hunters_num: 5
+  hunters_in_zone: false
+
   num_explorers: 0
   neighbor_N: 3
 
@@ -30,7 +32,7 @@ env:
   noisy_target_pos_std: 2  # max error percent
   noisy_target_vel_std: 10  # 
 
-  target_policy_source: patrol # Choices: ["learn", "patrol", "Random"]
+  target_policy_source: learn # Choices: ["learn", "patrol", "Random"]
   target_patrol_path: datasets/patrol_routes.json
   target_patrol_names: ["all"]
   target_switch_interval: 10
@@ -71,6 +73,12 @@ reward:
   base_near_scale: 1.0
   base_streak_scale: 0.1
   base_streak_cap: 30
+
+  # Escape Gap
+  escape_gap_enable: true
+  escape_gap_hunter_reward_scale: 1.0
+  escape_gap_target_reward_scale: 0.3
+  escape_radius: 35.0
 
   # Capture reward
   hunter_capture_reward: 15.0
@@ -125,7 +133,7 @@ schedule:
   use_linear_lr_decay: false
 
 logging:
-  log_gif: false         # 训练阶段是否按规则保存GIF
+  log_gif: true         # 训练阶段是否按规则保存GIF
 
 eval:
   eval_episode_length: 600
