@@ -900,9 +900,18 @@ class UAVPursuitEnv(object):
         self.agent_num = self.num_hunters + 1
         self.neighbor_N = int(env_cfg.neighbor_N)
         self.neighbor_N = max(0, self.neighbor_N)
+        self.coord_summary_obs_enable = bool(env_cfg.coord_summary_obs_enable)
+        self.coord_topk_hunters = int(max(1, int(env_cfg.coord_topk_hunters)))
         self.neighbor_feat_dim = 6  # [dx,dy,dvx,dvy,d,valid]
         self.target_feat_dim = 6    # [dx,dy,dvx,dvy,d,visible]
-        self.obs_dim = 4 + self.neighbor_N * self.neighbor_feat_dim + self.target_feat_dim + 5
+        self.coord_summary_feat_dim = 2 if bool(self.coord_summary_obs_enable) else 0
+        self.obs_dim = (
+            4
+            + self.neighbor_N * self.neighbor_feat_dim
+            + self.target_feat_dim
+            + 5
+            + self.coord_summary_feat_dim
+        )
         self.action_dim = 2
 
         self.capture_dis = float(env_cfg.capture_dis)
@@ -929,6 +938,11 @@ class UAVPursuitEnv(object):
         self.base_near_scale = float(reward_cfg.base_near_scale)
         self.base_streak_scale = float(reward_cfg.base_streak_scale)
         self.base_streak_cap = int(reward_cfg.base_streak_cap)
+        self.base_reward_topk_enable = bool(reward_cfg.base_reward_topk_enable)
+        self.base_reward_topk_k = int(max(1, int(reward_cfg.base_reward_topk_k)))
+        self.base_reward_non_topk_scale = float(
+            np.clip(float(reward_cfg.base_reward_non_topk_scale), 0.0, 1.0)
+        )
         self.hunter_capture_reward = float(reward_cfg.hunter_capture_reward)
         self.target_captured_penalty = float(reward_cfg.target_captured_penalty)
         self.target_collision_penalty = float(reward_cfg.target_collision_penalty)
@@ -981,8 +995,16 @@ class UAVPursuitEnv(object):
         self.reward_step_count = 0
         self.hunter_reward_last = 0.0
         self.target_reward_last = 0.0
+        self.last_coord_summary_cache = np.zeros(
+            (self.agent_num, self.coord_summary_feat_dim),
+            dtype=np.float32,
+        )
         self.active_target_patrol_names = list(env_cfg.target_patrol_names)
         self.last_reset_mode = "initial"
+        self.last_coord_summary_cache = np.zeros(
+            (self.agent_num, self.coord_summary_feat_dim),
+            dtype=np.float32,
+        )
 
         # 步骤4：初始化Agent对象
         patrol_routes = self._load_patrol_routes(
@@ -1565,6 +1587,22 @@ class UAVPursuitEnv(object):
                 "escape_gap_open_score": float(self.target.last_escape_gap_open_score),
                 "escape_gap_hunter_direction_score": float(self.target.last_escape_gap_hunter_direction_score),
                 "escape_gap_target_direction_score": float(self.target.last_escape_gap_target_direction_score),
+                "coord_self_is_topk": float(
+                    self.last_coord_summary_cache[i, 0]
+                    if (
+                        bool(self.coord_summary_obs_enable)
+                        and self.last_coord_summary_cache.shape[1] >= 1
+                    )
+                    else 0.0
+                ),
+                "coord_hunters_in_escape_radius_count": float(
+                    self.last_coord_summary_cache[i, 1]
+                    if (
+                        bool(self.coord_summary_obs_enable)
+                        and self.last_coord_summary_cache.shape[1] >= 2
+                    )
+                    else 0.0
+                ),
                 "active_agent": bool(
                     True if a.role != "hunter" else self.active_hunter_mask[int(i)]
                 ),
@@ -2184,18 +2222,33 @@ class UAVPursuitEnv(object):
         ## Target的reward与Hunter完全相反
 
         # 2. streak reward: 要求hunter尽可能长期处于Target捕捉半径内
+        active_dist_pairs = []
+        for hid, hunter in enumerate(self.hunters):
+            if not bool(self.active_hunter_mask[hid]):
+                continue
+            d_val = float(np.linalg.norm(hunter.position - self.target.position))
+            active_dist_pairs.append((d_val, int(hid)))
+        active_dist_pairs.sort(key=lambda x: x[0])
+        if bool(self.base_reward_topk_enable):
+            topk = int(min(max(1, self.base_reward_topk_k), len(active_dist_pairs)))
+            topk_ids = {hid for _, hid in active_dist_pairs[:topk]}
+        else:
+            topk_ids = {hid for _, hid in active_dist_pairs}
+
         for i, h in enumerate(self.hunters):
             if not bool(self.active_hunter_mask[i]):
                 continue
             d = float(np.linalg.norm(h.position - self.target.position))
             hunter_d.append(d)
+            is_topk_hunter = bool(int(i) in topk_ids)
+            base_scale = 1.0 if is_topk_hunter else float(self.base_reward_non_topk_scale)
 
             if d <= capture_dis_safe:
                 near_ratio = 1.0 - d / capture_dis_safe
-                hunter_base_reward[i] = self.base_near_scale * near_ratio
+                hunter_base_reward[i] = self.base_near_scale * near_ratio * base_scale
             else:
                 far_ratio = (d - capture_dis_safe) / dist_scale
-                hunter_base_reward[i] = -self.base_far_scale * far_ratio
+                hunter_base_reward[i] = -self.base_far_scale * far_ratio * base_scale
 
             streak_i = int(min(int(self.capture_counter[i]), streak_cap))
             streak_used.append(streak_i)
@@ -2303,7 +2356,7 @@ class UAVPursuitEnv(object):
     def _build_obs(self, team_sees_target):
         """
         功能:
-            组装每个agent的观测向量（own + neighbor + target + memory）。
+            组装每个agent的观测向量（own + neighbor + target + memory + coord_summary）。
         输入:
             team_sees_target (bool): 追捕组是否共享可见target信息。
         输出:
@@ -2319,7 +2372,10 @@ class UAVPursuitEnv(object):
             neighbor_obs = self._neighbor_obs(i, scale)
             target_obs = self._target_obs(i, team_sees_target, scale)
             memory_obs = self._memory_obs(i, team_sees_target, scale)
-            parts = [own, neighbor_obs, target_obs, memory_obs]
+            coord_summary_obs = self._coord_summary_obs(i)
+            if bool(self.coord_summary_obs_enable):
+                self.last_coord_summary_cache[int(i)] = coord_summary_obs.astype(np.float32)
+            parts = [own, neighbor_obs, target_obs, memory_obs, coord_summary_obs]
             obs.append(np.concatenate(parts, axis=0).astype(np.float32))
         return obs
 
@@ -2484,6 +2540,55 @@ class UAVPursuitEnv(object):
         rel_vel = (self.shared_target_vel - agent.velocity) / scale
         age_norm = float(self.last_seen_age) / float(max(1, self.max_steps))
         return np.array([rel_pos[0], rel_pos[1], rel_vel[0], rel_vel[1], age_norm], dtype=np.float32)
+
+    def _coord_summary_obs(self, obs_idx):
+        """
+        功能:
+            构造协同摘要观测（self_is_topk_by_target_distance, hunters_in_escape_radius_count）。
+        输入:
+            obs_idx (int): 当前观测agent索引。
+        输出:
+            np.ndarray: shape=(2,)；未启用或无效时返回全零。
+        """
+        if not bool(self.coord_summary_obs_enable):
+            return np.zeros(0, dtype=np.float32)
+        if obs_idx == self.target_index:
+            return np.zeros(2, dtype=np.float32)
+        if obs_idx < self.num_hunters and not bool(self.active_hunter_mask[obs_idx]):
+            return np.zeros(2, dtype=np.float32)
+        if not bool(self.target.alive):
+            return np.zeros(2, dtype=np.float32)
+
+        # Step 1: 计算self是否位于“距离Target最近的Top-K Hunter”。
+        alive_active_ids = [
+            hid
+            for hid in range(self.num_hunters)
+            if bool(self.active_hunter_mask[hid]) and bool(self.hunters[hid].alive)
+        ]
+        if len(alive_active_ids) == 0:
+            return np.zeros(2, dtype=np.float32)
+        dist_pairs = []
+        for hid in alive_active_ids:
+            dist_val = float(np.linalg.norm(self.hunters[hid].position - self.target.position))
+            dist_pairs.append((dist_val, int(hid)))
+        dist_pairs.sort(key=lambda x: x[0])
+        topk = int(min(max(1, self.coord_topk_hunters), len(dist_pairs)))
+        topk_ids = {hid for _, hid in dist_pairs[:topk]}
+        self_is_topk = 1.0 if int(obs_idx) in topk_ids else 0.0
+
+        # Step 2: 统计与Target距离小于escape_radius的Hunter数量（潜在参与包围数量）。
+        escape_radius = float(max(0.0, self.target.escape_dis))
+        if escape_radius <= 0.0:
+            hunters_in_escape_radius_count = 0.0
+        else:
+            in_radius_count = 0
+            for _, hid in dist_pairs:
+                dist_val = float(np.linalg.norm(self.hunters[hid].position - self.target.position))
+                if dist_val < escape_radius:
+                    in_radius_count += 1
+            hunters_in_escape_radius_count = float(in_radius_count)
+
+        return np.array([float(self_is_topk), float(hunters_in_escape_radius_count)], dtype=np.float32)
 
     def _load_patrol_routes(self, route_path, route_names):
         """

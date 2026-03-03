@@ -1,18 +1,20 @@
 exp:
   algorithm_name: rmappo
-  experiment_name: acc5v1_Escape
+  experiment_name: acc5v1_Tk4_Escape
   seed: 1
   num_env_steps: 2000000 # total environment steps to train
 
 # Environment settings (common)
 env:
-  env_name: Pursuit-Zone
+  env_name: Pursuit-Zone-Coobs
   world_size: 200
   episode_length: 400 # max steps per episode
   max_hunters_num: 5
   hunters_in_zone: false
 
   neighbor_N: 3
+  coord_summary_obs_enable: false
+  coord_topk_hunters: 4
 
   target_policy_source: learn # Choices: ["learn", "patrol", "Random"]
   target_switch_interval: 10
@@ -38,6 +40,9 @@ reward:
   base_near_scale: 1.0
   base_streak_scale: 0.1
   base_streak_cap: 30
+  base_reward_topk_enable: true
+  base_reward_topk_k: 4
+  base_reward_non_topk_scale: 0.1
 
   # Escape Gap
   escape_gap_enable: true
@@ -72,7 +77,7 @@ schedule:
   use_linear_lr_decay: true
 
 logging:
-  log_gif: true         # 训练阶段是否按规则保存GIF
+  log_gif: false         # 训练阶段是否按规则保存GIF
 
 eval:
   eval_episode_length: 600
