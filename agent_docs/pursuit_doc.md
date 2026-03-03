@@ -8,6 +8,7 @@
 ## 摘要（论文式）
 本文提出并实现了一个面向多无人机协同追逃任务的连续控制训练框架。系统在 Hunter-only 设定下，将多 Hunter 与单 Target 的博弈过程建模为多智能体马尔可夫决策过程，并基于 MAPPO/RMAPPO 完成策略优化。针对多 Hunter 在接近目标时容易因碰撞与路径冲突导致协同退化的问题，项目引入了基于最大潜在逃脱夹角的围捕几何奖励：Hunter 被激励形成更高包围质量并压制目标沿缺口逃逸，Target 被激励朝缺口方向运动。工程层面，框架支持固定任务可复现评估、分桶统计、过程可视化，以及近实战初始化（Hunter 区域编队随机投放与 Target 区域避让）。实验接口与日志体系完整，具备可复现实验与后续算法扩展能力。
 
+
 ---
 
 ## 1. 研究背景与意义
@@ -77,12 +78,19 @@
 - `neighbor_obs`：最近同阵营邻居槽位（含相对位置/速度/距离/有效位）；
 - `target_obs`：相对目标特征（含可见性位）；
 - `memory_obs`：团队共享目标记忆（仅 Hunter 可用）。
+- `coord_summary_obs`（可选，默认开启，2维）：
+  - `self_is_topk_by_target_distance`：自身是否处于“距离Target最近Top-K Hunter”；
+  - `hunters_in_escape_radius_count`：当前与Target距离小于 `escape_radius` 的Hunter数量（潜在参与包围数量）。
 
 #### 2.2.3 动作空间
 每个 agent 动作为二维连续向量 `a ∈ [-1,1]^2`：
 - `velocity` 模式：动作映射为目标速度；
 - `acceleration` 模式：动作映射为加速度并积分更新速度；
 - 可选转向角限制（高速时启用）。
+
+协同摘要观测由配置控制：
+- `env.coord_summary_obs_enable`：是否启用该2维观测槽位；
+- `env.coord_topk_hunters`：Top-K阈值。
 
 #### 2.2.4 状态转移与终止
 单步流程：

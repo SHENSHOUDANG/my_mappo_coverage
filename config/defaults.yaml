@@ -21,6 +21,8 @@ env:
   hunters_in_zone: false
   target_avoid_hunter_zone: false
   target_hunter_zone_min_dis: 30.0
+  coord_summary_obs_enable: true
+  coord_topk_hunters: 3
 
   capture_dis: 20
   capture_step: 10
@@ -71,6 +73,9 @@ reward:
   base_near_scale: 1.0
   base_streak_scale: 0.1
   base_streak_cap: 30
+  base_reward_topk_enable: false
+  base_reward_topk_k: 2
+  base_reward_non_topk_scale: 0.1
 
   # Capture reward
   hunter_capture_reward: 15.0

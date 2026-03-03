@@ -30,14 +30,22 @@
   `[dx, dy, dvx, dvy, d, valid]`。
 - `target_obs`: 6 维 `[dx, dy, dvx, dvy, d, visible]`。
 - `memory_obs`: 5 维共享目标记忆 `[dx, dy, dvx, dvy, age_norm]`。
+- `coord_summary_obs`（可选2维）：
+  - `self_is_topk_by_target_distance`：当前Hunter是否属于距离Target最近Top-K；
+  - `hunters_in_escape_radius_count`：与Target距离小于 `escape_radius` 的Hunter数量（潜在参与包围数量）。
 
 总维度：
-`obs_dim = 4 + neighbor_N * 6 + 6 + 5`
+`obs_dim = 4 + neighbor_N * 6 + 6 + 5 + coord_summary_dim`
+其中 `coord_summary_dim = 2`（启用）或 `0`（关闭）。
 
 说明：
 - Hunter 在“本步团队不可见 target 且共享记忆有效”时，`memory_obs` 才非零。
 - Target 的 `memory_obs` 永远为零。
 - 不活跃 hunter（由任务规格裁剪）观测为全零，并在 info 中标记 `active_agent=false`。
+- Target 的 `coord_summary_obs` 为全零（该摘要用于Hunter协同）。
+- 配置项：
+  - `env.coord_summary_obs_enable`
+  - `env.coord_topk_hunters`
 
 ## 4. 可见性与共享记忆
 - `team_sees_target=True` 条件：任一 active 且存活 Hunter 在感知半径内（或感知半径 < 0）。
