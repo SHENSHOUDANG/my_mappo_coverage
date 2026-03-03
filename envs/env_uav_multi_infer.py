@@ -51,7 +51,14 @@ class MultiUAVInferenceEnv(object):
         self.num_hunters = int(env_cfg.max_hunters_num)
         self.num_explorers = int(env_cfg.num_explorers)
         self.num_targets = int(env_cfg.num_targets)
+        self.num_trackers = int(max(0, int(env_cfg.get("num_trackers", self.num_explorers))))
         self.assignment_hunters_per_target = int(max(1, int(env_cfg.assignment_hunters_per_target)))
+        self.target_value_min = float(env_cfg.get("target_value_min", 1.0))
+        self.target_value_max = float(env_cfg.get("target_value_max", 10.0))
+        self.target_required_hunters_min = int(max(1, int(env_cfg.get("target_required_hunters_min", 1))))
+        self.target_required_hunters_max = int(max(self.target_required_hunters_min, int(env_cfg.get("target_required_hunters_max", self.assignment_hunters_per_target))))
+        self.target_known_pos_prob = float(np.clip(float(env_cfg.get("target_known_pos_prob", 0.5)), 0.0, 1.0))
+        self.target_known_vel_prob = float(np.clip(float(env_cfg.get("target_known_vel_prob", 0.5)), 0.0, 1.0))
 
         self.capture_dis = float(env_cfg.capture_dis)
         self.capture_step = int(env_cfg.capture_step)
@@ -59,6 +66,7 @@ class MultiUAVInferenceEnv(object):
 
         self.hunter_perception_radius = float(hunter_cfg.perception_radius)
         self.explorer_perception_radius = float(explorer_cfg.perception_radius)
+        self.tracker_perception_radius = float(env_cfg.get("tracker_perception_radius", self.explorer_perception_radius))
 
         self.neighbor_N = int(env_cfg.neighbor_N)
         self.neighbor_feat_dim = 6
@@ -74,6 +82,7 @@ class MultiUAVInferenceEnv(object):
 
         self.hunters: List[HunterAgent] = []
         self.explorers: List[ExplorerAgent] = []
+        self.trackers: List[ExplorerAgent] = []
         self.targets: List[TargetAgent] = []
 
         self.explorer_state: List[str] = []
@@ -82,11 +91,20 @@ class MultiUAVInferenceEnv(object):
         self.explorer_path_idx: List[int] = []
 
         self.hunter_assignment: List[int] = []  # hunter_id -> target_id, -1 means idle
+        self.tracker_assignment: List[int] = []  # tracker_id -> target_id, -1 means idle
         self.target_capture_counter = np.zeros((self.num_hunters, self.num_targets), dtype=np.int32)
         self.target_alive = np.ones(self.num_targets, dtype=bool)
         self.target_discovered = np.zeros(self.num_targets, dtype=bool)
+        self.target_values = np.ones(self.num_targets, dtype=np.float32)
+        self.target_required_hunters = np.ones(self.num_targets, dtype=np.int32)
+        self.target_known_pos = np.zeros(self.num_targets, dtype=bool)
+        self.target_known_vel = np.zeros(self.num_targets, dtype=bool)
 
         self.shared_target_info: List[Dict[str, np.ndarray]] = []
+        self.explorer_cargo_hunters: List[List[int]] = []
+        self.explorer_cargo_trackers: List[List[int]] = []
+        self.hunter_follow_slot = np.zeros((self.num_hunters, 2), dtype=np.float32)
+        self.tracker_follow_slot = np.zeros((self.num_trackers, 2), dtype=np.float32)
 
         self.step_count = 0
         self.done = False
@@ -134,6 +152,19 @@ class MultiUAVInferenceEnv(object):
                 policy_type="random",
             )
             for i in range(self.num_explorers)
+        ]
+        self.trackers = [
+            ExplorerAgent(
+                agent_id=i,
+                max_speed=float(explorer_cfg.max_velo),
+                safe_dis=float(max(self.collision_dis, float(explorer_cfg.safe_dis))),
+                control_mode=str(explorer_cfg.control_mode).lower(),
+                max_acc=float(explorer_cfg.max_acc),
+                max_turn_angle=float(explorer_cfg.max_turn_angle),
+                min_turn_limit_velo=float(explorer_cfg.min_turn_limit_velo),
+                policy_type="tracker",
+            )
+            for i in range(self.num_trackers)
         ]
 
         patrol_routes = self._load_patrol_routes(
@@ -212,6 +243,14 @@ class MultiUAVInferenceEnv(object):
         self.target_capture_counter[:] = 0
         self.target_alive[:] = True
         self.target_discovered[:] = False
+        self.target_values = self.rng.uniform(
+            low=min(self.target_value_min, self.target_value_max),
+            high=max(self.target_value_min, self.target_value_max),
+            size=(self.num_targets,),
+        ).astype(np.float32)
+        self.target_required_hunters = np.zeros(self.num_targets, dtype=np.int32)
+        self.target_known_pos = self.rng.uniform(0.0, 1.0, size=(self.num_targets,)) < self.target_known_pos_prob
+        self.target_known_vel = self.rng.uniform(0.0, 1.0, size=(self.num_targets,)) < self.target_known_vel_prob
 
         self.explorer_state = ["SEARCH" for _ in range(self.num_explorers)]
         self.explorer_track_target = [-1 for _ in range(self.num_explorers)]
@@ -219,6 +258,7 @@ class MultiUAVInferenceEnv(object):
         self.explorer_path_idx = [0 for _ in range(self.num_explorers)]
 
         self.hunter_assignment = [-1 for _ in range(self.num_hunters)]
+        self.tracker_assignment = [-1 for _ in range(self.num_trackers)]
         self.shared_target_info = [
             {
                 "valid": False,
@@ -229,15 +269,28 @@ class MultiUAVInferenceEnv(object):
             }
             for _ in range(self.num_targets)
         ]
-
-        for h in self.hunters:
-            h.reset(self._sample_position())
-            h.alive = True
+        self.explorer_cargo_hunters = [[] for _ in range(self.num_explorers)]
+        self.explorer_cargo_trackers = [[] for _ in range(self.num_explorers)]
+        self._init_cargo_distribution()
 
         for i, e in enumerate(self.explorers):
             init_pos = self.explorer_paths[i][0].copy() if len(self.explorer_paths[i]) > 0 else self._sample_position()
             e.reset(init_pos)
             e.alive = True
+
+        for h in self.hunters:
+            if self.num_explorers > 0:
+                eid = h.agent_id % self.num_explorers
+                anchor = self.explorers[eid].position + self.hunter_follow_slot[h.agent_id]
+                h.reset(np.clip(anchor, -self.world_size, self.world_size).astype(np.float32))
+            else:
+                h.reset(self._sample_position())
+            h.alive = True
+
+        for i, tkr in enumerate(self.trackers):
+            anchor = self._tracker_anchor_position(i)
+            tkr.reset(anchor)
+            tkr.alive = True
 
         for i, t in enumerate(self.targets):
             t.policy_type = self._sample_target_policy_type()
@@ -245,8 +298,101 @@ class MultiUAVInferenceEnv(object):
             t.alive = True
             if t.policy_type == "static":
                 t.velocity[:] = 0.0
+            ratio = (float(self.target_values[i]) - float(self.target_value_min)) / max(1e-6, float(self.target_value_max - self.target_value_min))
+            ratio = float(np.clip(ratio, 0.0, 1.0))
+            req = int(round(self.target_required_hunters_min + ratio * (self.target_required_hunters_max - self.target_required_hunters_min)))
+            self.target_required_hunters[i] = int(np.clip(req, self.target_required_hunters_min, self.target_required_hunters_max))
+            # 所有Target初始时刻均不可见：不向共享记忆注入任何初始位姿信息。
+            self.shared_target_info[i]["valid"] = False
 
         return self.get_summary()
+
+    def _init_cargo_distribution(self):
+        """
+        功能:
+            初始化explorer携带的hunter/tracker分配，并生成方阵跟随偏移。
+        输入:
+            无。
+        输出:
+            无。
+        """
+        if self.num_explorers <= 0:
+            return
+
+        for hid in range(self.num_hunters):
+            eid = hid % self.num_explorers
+            self.explorer_cargo_hunters[eid].append(hid)
+        for tid in range(self.num_trackers):
+            eid = tid % self.num_explorers
+            self.explorer_cargo_trackers[eid].append(tid)
+
+        for eid in range(self.num_explorers):
+            for idx, hid in enumerate(self.explorer_cargo_hunters[eid]):
+                self.hunter_follow_slot[hid] = self._formation_offset(idx, spacing=6.0)
+            for idx, tid in enumerate(self.explorer_cargo_trackers[eid]):
+                self.tracker_follow_slot[tid] = self._formation_offset(idx, spacing=4.0, row_base=-8.0)
+
+    def _formation_offset(self, idx: int, spacing: float = 6.0, row_base: float = -10.0) -> np.ndarray:
+        """
+        功能:
+            生成方阵队形偏移（相对explorer坐标）。
+        输入:
+            idx (int): 编队中的序号。
+            spacing (float): 队形间距。
+            row_base (float): 队形后置偏移。
+        输出:
+            np.ndarray: shape=(2,) 偏移向量。
+        """
+        row = int(np.floor(np.sqrt(max(0, idx))))
+        row_size = row + 1
+        col = idx - row * row
+        col = int(np.clip(col, 0, max(0, row_size - 1)))
+        x = (col - (row_size - 1) * 0.5) * float(spacing)
+        y = float(row_base) - row * float(spacing)
+        return np.array([x, y], dtype=np.float32)
+
+    def _tracker_anchor_position(self, tracker_id: int) -> np.ndarray:
+        """
+        功能:
+            返回tracker当前应跟随的explorer锚点位置。
+        输入:
+            tracker_id (int): tracker索引。
+        输出:
+            np.ndarray: shape=(2,) 目标锚点坐标。
+        """
+        eid = self._carrier_explorer_for_tracker(tracker_id)
+        if eid < 0 or eid >= self.num_explorers:
+            return self._sample_position()
+        anchor = self.explorers[eid].position + self.tracker_follow_slot[tracker_id]
+        return np.clip(anchor, -self.world_size, self.world_size).astype(np.float32)
+
+    def _carrier_explorer_for_hunter(self, hunter_id: int) -> int:
+        """
+        功能:
+            查找当前携带某hunter的explorer编号。
+        输入:
+            hunter_id (int): hunter索引。
+        输出:
+            int: explorer索引，未找到返回-1。
+        """
+        for eid in range(self.num_explorers):
+            if hunter_id in self.explorer_cargo_hunters[eid]:
+                return int(eid)
+        return -1
+
+    def _carrier_explorer_for_tracker(self, tracker_id: int) -> int:
+        """
+        功能:
+            查找当前携带某tracker的explorer编号。
+        输入:
+            tracker_id (int): tracker索引。
+        输出:
+            int: explorer索引，未找到返回-1。
+        """
+        for eid in range(self.num_explorers):
+            if tracker_id in self.explorer_cargo_trackers[eid]:
+                return int(eid)
+        return -1
 
     def _sample_position(self) -> np.ndarray:
         """
@@ -262,20 +408,27 @@ class MultiUAVInferenceEnv(object):
     def _build_explorer_paths(self) -> List[List[np.ndarray]]:
         """
         功能:
-            构建 K 条分片弓字形搜索航线（每条在自身x区间内往返）。
+            构建 K 条分片弓字形搜索航线（每条在自身x区间内往返，且不贴地图边缘）。
         输入:
             无。
         输出:
             list[list[np.ndarray]]: 每个Explorer对应航点序列。
         """
         paths: List[List[np.ndarray]] = []
-        full = 2.0 * float(self.world_size)
-        x_edges = np.linspace(-self.world_size, self.world_size, self.num_explorers + 1)
+        ws = float(self.world_size)
+        edge_margin = float(self.explorer_perception_radius) * (1.0 - float(self.route_overlap_rate))
+        edge_margin = float(np.clip(edge_margin, 1.0, max(1.0, ws - 1.0)))
+        min_x = -ws + edge_margin
+        max_x = ws - edge_margin
+        min_y = -ws + edge_margin
+        max_y = ws - edge_margin
+        full = max(2.0, max_y - min_y)
+        x_edges = np.linspace(min_x, max_x, self.num_explorers + 1)
 
         spacing = 2.0 * float(self.explorer_perception_radius) * (1.0 - float(self.route_overlap_rate))
         spacing = float(max(1.0, spacing))
         stripes = int(max(2, np.ceil(full / spacing)))
-        y_vals = np.linspace(-self.world_size, self.world_size, stripes)
+        y_vals = np.linspace(min_y, max_y, stripes)
 
         for k in range(self.num_explorers):
             x0 = float(x_edges[k])
@@ -353,6 +506,7 @@ class MultiUAVInferenceEnv(object):
 
         self._step_explorers()
         self._step_targets(target_actions)
+        self._step_trackers()
         self._step_hunters(hunter_actions)
 
         self._update_discovery_and_shared_memory()
@@ -377,6 +531,7 @@ class MultiUAVInferenceEnv(object):
         输出:
             无。
         """
+        discovered_now = []
         for eid, explorer in enumerate(self.explorers):
             tracked_tid = int(self.explorer_track_target[eid])
             if tracked_tid >= 0 and (tracked_tid >= self.num_targets or not bool(self.target_alive[tracked_tid])):
@@ -402,7 +557,7 @@ class MultiUAVInferenceEnv(object):
                 self.explorer_track_target[eid] = int(best_tid)
                 self.explorer_state[eid] = "TRACK"
                 self.target_discovered[best_tid] = True
-                self._assign_hunters_to_target(best_tid)
+                discovered_now.append(int(best_tid))
 
         # 释放已死亡目标对应的hunter
         alive_targets = set([i for i in range(self.num_targets) if bool(self.target_alive[i])])
@@ -410,6 +565,16 @@ class MultiUAVInferenceEnv(object):
             t = int(self.hunter_assignment[hid])
             if t >= 0 and t not in alive_targets:
                 self.hunter_assignment[hid] = -1
+                self._reattach_hunter_to_nearest_explorer(hid)
+        for trid in range(self.num_trackers):
+            t = int(self.tracker_assignment[trid])
+            if t >= 0 and t not in alive_targets:
+                self.tracker_assignment[trid] = -1
+                self._reattach_tracker_to_nearest_explorer(trid)
+
+        for tid in discovered_now:
+            self._assign_tracker_to_target(tid)
+        self._rebalance_hunter_assignment_by_value()
 
     def _assign_hunters_to_target(self, target_id: int):
         """
@@ -421,9 +586,9 @@ class MultiUAVInferenceEnv(object):
             无。
         """
         target_pos = self.targets[target_id].position
-
         assigned = [i for i, t in enumerate(self.hunter_assignment) if int(t) == int(target_id)]
-        need = int(max(0, self.assignment_hunters_per_target - len(assigned)))
+        target_need = int(max(1, int(self.target_required_hunters[target_id])))
+        need = int(max(0, target_need - len(assigned)))
         if need <= 0:
             return
 
@@ -434,6 +599,163 @@ class MultiUAVInferenceEnv(object):
         idle_hunters.sort(key=lambda hid: float(np.linalg.norm(self.hunters[hid].position - target_pos)))
         for hid in idle_hunters[:need]:
             self.hunter_assignment[hid] = int(target_id)
+            self._detach_hunter_from_cargo(hid)
+
+    def _assign_tracker_to_target(self, target_id: int):
+        """
+        功能:
+            为目标分配1个tracker；若已有则保持。
+        输入:
+            target_id (int): 目标索引。
+        输出:
+            无。
+        """
+        current = [i for i, t in enumerate(self.tracker_assignment) if int(t) == int(target_id)]
+        if len(current) > 0:
+            return
+        idle_trackers = [i for i, t in enumerate(self.tracker_assignment) if int(t) < 0]
+        if len(idle_trackers) <= 0:
+            return
+        target_pos = self.targets[target_id].position
+        idle_trackers.sort(key=lambda trid: float(np.linalg.norm(self.trackers[trid].position - target_pos)))
+        choose = int(idle_trackers[0])
+        self.tracker_assignment[choose] = int(target_id)
+        self._detach_tracker_from_cargo(choose)
+
+    def _detach_hunter_from_cargo(self, hunter_id: int):
+        """
+        功能:
+            将hunter从其携带explorer队列中移除。
+        输入:
+            hunter_id (int): hunter索引。
+        输出:
+            无。
+        """
+        for eid in range(self.num_explorers):
+            if hunter_id in self.explorer_cargo_hunters[eid]:
+                self.explorer_cargo_hunters[eid].remove(hunter_id)
+                break
+
+    def _detach_tracker_from_cargo(self, tracker_id: int):
+        """
+        功能:
+            将tracker从其携带explorer队列中移除。
+        输入:
+            tracker_id (int): tracker索引。
+        输出:
+            无。
+        """
+        for eid in range(self.num_explorers):
+            if tracker_id in self.explorer_cargo_trackers[eid]:
+                self.explorer_cargo_trackers[eid].remove(tracker_id)
+                break
+
+    def _reattach_hunter_to_nearest_explorer(self, hunter_id: int):
+        """
+        功能:
+            将空闲hunter挂回最近explorer队列。
+        输入:
+            hunter_id (int): hunter索引。
+        输出:
+            无。
+        """
+        if self.num_explorers <= 0:
+            return
+        self._detach_hunter_from_cargo(hunter_id)
+        nearest = min(
+            range(self.num_explorers),
+            key=lambda eid: float(np.linalg.norm(self.explorers[eid].position - self.hunters[hunter_id].position)),
+        )
+        self.explorer_cargo_hunters[nearest].append(int(hunter_id))
+        self.hunter_follow_slot[hunter_id] = self._formation_offset(
+            len(self.explorer_cargo_hunters[nearest]) - 1,
+            spacing=6.0,
+        )
+
+    def _reattach_tracker_to_nearest_explorer(self, tracker_id: int):
+        """
+        功能:
+            将空闲tracker挂回最近explorer队列。
+        输入:
+            tracker_id (int): tracker索引。
+        输出:
+            无。
+        """
+        if self.num_explorers <= 0:
+            return
+        self._detach_tracker_from_cargo(tracker_id)
+        nearest = min(
+            range(self.num_explorers),
+            key=lambda eid: float(np.linalg.norm(self.explorers[eid].position - self.trackers[tracker_id].position)),
+        )
+        self.explorer_cargo_trackers[nearest].append(int(tracker_id))
+        self.tracker_follow_slot[tracker_id] = self._formation_offset(
+            len(self.explorer_cargo_trackers[nearest]) - 1,
+            spacing=4.0,
+            row_base=-8.0,
+        )
+
+    def _rebalance_hunter_assignment_by_value(self):
+        """
+        功能:
+            基于目标价值重分配hunter，不足时优先满足高价值目标。
+        输入:
+            无。
+        输出:
+            无。
+        """
+        discovered_alive = [
+            tid for tid in range(self.num_targets)
+            if bool(self.target_alive[tid]) and bool(self.target_discovered[tid])
+        ]
+        if len(discovered_alive) <= 0:
+            return
+
+        discovered_alive.sort(key=lambda tid: (-float(self.target_values[tid]), int(tid)))
+        desired = {tid: int(max(1, self.target_required_hunters[tid])) for tid in discovered_alive}
+
+        for hid in range(self.num_hunters):
+            assigned_tid = int(self.hunter_assignment[hid])
+            if assigned_tid < 0:
+                continue
+            if assigned_tid not in desired:
+                self.hunter_assignment[hid] = -1
+                self._reattach_hunter_to_nearest_explorer(hid)
+
+        for tid in discovered_alive:
+            assigned = [hid for hid in range(self.num_hunters) if int(self.hunter_assignment[hid]) == int(tid)]
+            need = int(max(0, desired[tid] - len(assigned)))
+            if need <= 0:
+                continue
+
+            idle_hunters = [hid for hid in range(self.num_hunters) if int(self.hunter_assignment[hid]) < 0]
+            target_pos = self.targets[tid].position
+            idle_hunters.sort(key=lambda hid: float(np.linalg.norm(self.hunters[hid].position - target_pos)))
+            for hid in idle_hunters[:need]:
+                self.hunter_assignment[hid] = int(tid)
+                self._detach_hunter_from_cargo(hid)
+            need = int(max(0, desired[tid] - len([hid for hid in range(self.num_hunters) if int(self.hunter_assignment[hid]) == int(tid)])))
+            if need <= 0:
+                continue
+
+            donor_targets = [x for x in discovered_alive if float(self.target_values[x]) < float(self.target_values[tid])]
+            donor_targets.sort(key=lambda x: float(self.target_values[x]))
+            for donor in donor_targets:
+                donor_h = [hid for hid in range(self.num_hunters) if int(self.hunter_assignment[hid]) == int(donor)]
+                donor_keep = 0
+                spare = max(0, len(donor_h) - donor_keep)
+                if spare <= 0:
+                    continue
+                donor_h.sort(
+                    key=lambda hid: float(np.linalg.norm(self.hunters[hid].position - self.targets[tid].position))
+                )
+                for hid in donor_h[: min(spare, need)]:
+                    self.hunter_assignment[hid] = int(tid)
+                    need -= 1
+                    if need <= 0:
+                        break
+                if need <= 0:
+                    break
 
     def _step_explorers(self):
         """
@@ -464,6 +786,30 @@ class MultiUAVInferenceEnv(object):
                     if float(np.linalg.norm(explorer.position - wp)) <= max(1.0, explorer.max_speed * self.dt):
                         self.explorer_path_idx[eid] = (self.explorer_path_idx[eid] + 1) % len(path)
             explorer.step(action, self.dt, self.world_size)
+
+    def _step_trackers(self):
+        """
+        功能:
+            推进tracker状态：已分配则最大速度跟踪目标，未分配则方阵跟随explorer。
+        输入:
+            无。
+        输出:
+            无。
+        """
+        for trid, tracker in enumerate(self.trackers):
+            if not tracker.alive:
+                continue
+            assigned_tid = int(self.tracker_assignment[trid])
+            if assigned_tid >= 0 and assigned_tid < self.num_targets and bool(self.target_alive[assigned_tid]):
+                action = self._towards_action(tracker.position, self.targets[assigned_tid].position)
+            else:
+                eid = self._carrier_explorer_for_tracker(trid)
+                if eid < 0 or eid >= self.num_explorers:
+                    action = np.zeros(2, dtype=np.float32)
+                else:
+                    anchor = self.explorers[eid].position + self.tracker_follow_slot[trid]
+                    action = self._towards_action(tracker.position, anchor)
+            tracker.step(action, self.dt, self.world_size)
 
     def _step_targets(self, target_actions: Optional[np.ndarray]):
         """
@@ -506,7 +852,12 @@ class MultiUAVInferenceEnv(object):
                 continue
             assigned_tid = int(self.hunter_assignment[hid])
             if assigned_tid < 0 or (not bool(self.target_alive[assigned_tid])):
-                action = np.zeros(2, dtype=np.float32)
+                eid = self._carrier_explorer_for_hunter(hid)
+                if eid < 0 or eid >= self.num_explorers:
+                    action = np.zeros(2, dtype=np.float32)
+                else:
+                    anchor = self.explorers[eid].position + self.hunter_follow_slot[hid]
+                    action = self._towards_action(hunter.position, anchor)
             else:
                 if hunter_actions is None:
                     # 无模型动作时退化为追踪目标
@@ -545,10 +896,10 @@ class MultiUAVInferenceEnv(object):
                 self.shared_target_info[tid]["valid"] = False
                 continue
 
-            tracker_found = False
+            tracked_or_found = False
             for eid in range(self.num_explorers):
                 if int(self.explorer_track_target[eid]) == int(tid):
-                    tracker_found = True
+                    tracked_or_found = True
                     self.shared_target_info[tid]["valid"] = True
                     self.shared_target_info[tid]["pos"] = self.targets[tid].position.copy()
                     self.shared_target_info[tid]["vel"] = self.targets[tid].velocity.copy()
@@ -556,7 +907,21 @@ class MultiUAVInferenceEnv(object):
                     self.shared_target_info[tid]["timestamp"] = np.int32(self.step_count)
                     break
 
-            if not tracker_found:
+            if not tracked_or_found:
+                for trid in range(self.num_trackers):
+                    if int(self.tracker_assignment[trid]) == int(tid):
+                        tracker = self.trackers[trid]
+                        d = float(np.linalg.norm(tracker.position - self.targets[tid].position))
+                        if d <= float(self.tracker_perception_radius):
+                            tracked_or_found = True
+                            self.shared_target_info[tid]["valid"] = True
+                            self.shared_target_info[tid]["pos"] = self.targets[tid].position.copy()
+                            self.shared_target_info[tid]["vel"] = self.targets[tid].velocity.copy()
+                            self.shared_target_info[tid]["age"] = np.float32(0.0)
+                            self.shared_target_info[tid]["timestamp"] = np.int32(self.step_count)
+                            break
+
+            if not tracked_or_found:
                 if bool(self.shared_target_info[tid]["valid"]):
                     self.shared_target_info[tid]["age"] = np.float32(self.shared_target_info[tid]["age"] + 1.0)
 
@@ -595,6 +960,14 @@ class MultiUAVInferenceEnv(object):
                 target.alive = False
                 target.velocity[:] = 0.0
                 self.shared_target_info[tid]["valid"] = False
+                for hid in range(self.num_hunters):
+                    if int(self.hunter_assignment[hid]) == int(tid):
+                        self.hunter_assignment[hid] = -1
+                        self._reattach_hunter_to_nearest_explorer(hid)
+                for trid in range(self.num_trackers):
+                    if int(self.tracker_assignment[trid]) == int(tid):
+                        self.tracker_assignment[trid] = -1
+                        self._reattach_tracker_to_nearest_explorer(trid)
                 new_captured += 1
 
         return int(new_captured)
@@ -712,6 +1085,8 @@ class MultiUAVInferenceEnv(object):
             "targets_alive": float(np.sum(self.target_alive.astype(np.int32))),
             "targets_captured": float(self.num_targets - int(np.sum(self.target_alive.astype(np.int32)))),
             "targets_discovered": float(np.sum(self.target_discovered.astype(np.int32))),
+            "active_trackers": float(np.sum(np.asarray(self.tracker_assignment, dtype=np.int32) >= 0)),
+            "active_hunters": float(np.sum(np.asarray(self.hunter_assignment, dtype=np.int32) >= 0)),
         }
 
     def get_metrics(self) -> Dict[str, float]:
@@ -734,6 +1109,10 @@ class MultiUAVInferenceEnv(object):
             "targets_captured": float(captured),
             "capture_rate": float(capture_rate),
             "discover_rate": float(discover_rate),
+            "active_trackers": float(np.sum(np.asarray(self.tracker_assignment, dtype=np.int32) >= 0)),
+            "active_hunters": float(np.sum(np.asarray(self.hunter_assignment, dtype=np.int32) >= 0)),
+            "captured_value": float(np.sum(self.target_values[np.logical_not(self.target_alive)])) if self.num_targets > 0 else 0.0,
+            "alive_value": float(np.sum(self.target_values[self.target_alive])) if self.num_targets > 0 else 0.0,
         }
 
     def _draw_scene(self, ax):
@@ -753,12 +1132,14 @@ class MultiUAVInferenceEnv(object):
         ax.set_xlabel("x (m)")
         ax.set_ylabel("y (m)")
         ax.set_title(
-            "Step {}/{} | Captured {}/{} | Discover {:.2f}".format(
+            "Step {}/{} | Captured {}/{} | Discover {:.2f} | Active H/R: {}/{}".format(
                 int(self.step_count),
                 int(self.max_steps),
                 int(self.num_targets - int(np.sum(self.target_alive.astype(np.int32)))),
                 int(self.num_targets),
                 float(np.sum(self.target_discovered.astype(np.int32)) / max(1, self.num_targets)),
+                int(np.sum(np.asarray(self.hunter_assignment, dtype=np.int32) >= 0)),
+                int(np.sum(np.asarray(self.tracker_assignment, dtype=np.int32) >= 0)),
             )
         )
 
@@ -824,6 +1205,26 @@ class MultiUAVInferenceEnv(object):
                     alpha=0.45,
                 )
 
+        # trackers
+        for trid, tracker in enumerate(self.trackers):
+            assigned_tid = int(self.tracker_assignment[trid])
+            engaged = assigned_tid >= 0 and assigned_tid < self.num_targets and bool(self.target_alive[assigned_tid])
+            color = "#8c564b" if engaged else "#c49c94"
+            alpha = 1.0 if engaged else 0.55
+            ax.scatter([tracker.position[0]], [tracker.position[1]], c=[color], s=48, marker="D", alpha=alpha, edgecolors="black", linewidths=0.4)
+            txt = f"R{trid}->T{assigned_tid}" if engaged else f"R{trid}(carry)"
+            ax.text(float(tracker.position[0]), float(tracker.position[1]), txt, fontsize=7, color=color, alpha=alpha)
+            if engaged:
+                tp = self.targets[assigned_tid].position
+                ax.plot(
+                    [float(tracker.position[0]), float(tp[0])],
+                    [float(tracker.position[1]), float(tp[1])],
+                    color=color,
+                    linestyle=":",
+                    linewidth=0.9,
+                    alpha=0.7,
+                )
+
         # targets
         for tid, t in enumerate(self.targets):
             alive = bool(self.target_alive[tid]) and bool(t.alive)
@@ -840,7 +1241,7 @@ class MultiUAVInferenceEnv(object):
             ax.text(
                 float(t.position[0]),
                 float(t.position[1]),
-                f"T{tid}:{str(t.policy_type)[:2]}:{status}",
+                f"T{tid}:{str(t.policy_type)[:2]}:{status}|V={float(self.target_values[tid]):.1f}|H={int(self.target_required_hunters[tid])}",
                 fontsize=7,
                 color=color,
                 alpha=alpha,
@@ -876,6 +1277,8 @@ class MultiUAVInferenceEnv(object):
             Line2D([0], [0], marker="o", color="w", markerfacecolor="#1f77b4", markeredgecolor="black", alpha=0.35, markersize=7, label="Hunter idle"),
             Line2D([0], [0], marker="^", color="w", markerfacecolor="#9467bd", markeredgecolor="black", alpha=0.45, markersize=8, label="Explorer SEARCH"),
             Line2D([0], [0], marker="^", color="w", markerfacecolor="#e377c2", markeredgecolor="black", markersize=8, label="Explorer TRACK"),
+            Line2D([0], [0], marker="D", color="w", markerfacecolor="#8c564b", markeredgecolor="black", markersize=7, label="Tracker engaged"),
+            Line2D([0], [0], marker="D", color="w", markerfacecolor="#c49c94", markeredgecolor="black", markersize=7, label="Tracker carried"),
             Line2D([0], [0], color="#9ecae1", linewidth=1.0, label="Explorer route segment"),
             Line2D([0], [0], marker="*", color="w", markerfacecolor="#e377c2", markeredgecolor="black", markersize=10, label="Shared target memory"),
         ]

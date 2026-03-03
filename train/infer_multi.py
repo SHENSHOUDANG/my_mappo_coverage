@@ -167,11 +167,20 @@ def main(args):
         env.seed(seed + ep * 1000)
         env.reset()
         print(
-            "[EpisodeStart] ep={}, targets={}, hunters={}, explorers={}".format(
+            "[EpisodeStart] ep={}, targets={}, hunters={}, explorers={}, trackers={}".format(
                 int(ep),
                 int(env.num_targets),
                 int(env.num_hunters),
                 int(env.num_explorers),
+                int(env.num_trackers),
+            )
+        )
+        print(
+            "[TargetProfile] values={}, required_hunters={}, known_pos={}, known_vel={}".format(
+                [float(x) for x in np.asarray(env.target_values, dtype=np.float32)],
+                [int(x) for x in np.asarray(env.target_required_hunters, dtype=np.int32)],
+                [bool(x) for x in np.asarray(env.target_known_pos, dtype=bool)],
+                [bool(x) for x in np.asarray(env.target_known_vel, dtype=bool)],
             )
         )
 
@@ -233,13 +242,16 @@ def main(args):
 
             if int(env.step_count) % max(1, int(args.log_interval)) == 0 or done:
                 print(
-                    "[Step] ep={}, step={}, captured={}, alive={}, discover_rate={:.3f}, capture_rate={:.3f}".format(
+                    "[Step] ep={}, step={}, captured={}, alive={}, discover_rate={:.3f}, capture_rate={:.3f}, active_h={}, active_r={}, captured_value={:.2f}".format(
                         int(ep),
                         int(env.step_count),
                         int(metrics["targets_captured"]),
                         int(metrics["targets_alive"]),
                         float(metrics["discover_rate"]),
                         float(metrics["capture_rate"]),
+                        int(metrics.get("active_hunters", 0.0)),
+                        int(metrics.get("active_trackers", 0.0)),
+                        float(metrics.get("captured_value", 0.0)),
                     )
                 )
 
@@ -261,11 +273,12 @@ def main(args):
                 print(f"[GIF] saved episode gif: {gif_path}")
 
         print(
-            "[EpisodeEnd] ep={}, step={}, capture_rate={:.3f}, discover_rate={:.3f}".format(
+            "[EpisodeEnd] ep={}, step={}, capture_rate={:.3f}, discover_rate={:.3f}, captured_value={:.2f}".format(
                 int(ep),
                 int(ep_metrics["step"]),
                 float(ep_metrics["capture_rate"]),
                 float(ep_metrics["discover_rate"]),
+                float(ep_metrics.get("captured_value", 0.0)),
             )
         )
 
