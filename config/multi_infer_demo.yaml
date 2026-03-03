@@ -32,10 +32,18 @@ multi_infer:
     world_size: 120
     dt: 0.1
     max_steps: 600
-    max_hunters_num: 10
+    max_hunters_num: 20
     num_explorers: 3
-    num_targets: 4
+    num_trackers: 6
+    num_targets: 6
     assignment_hunters_per_target: 2
+    target_value_min: 1.0
+    target_value_max: 10.0
+    target_required_hunters_min: 1
+    target_required_hunters_max: 4
+    target_known_pos_prob: 0.5
+    target_known_vel_prob: 0.3
+    tracker_perception_radius: 35
     capture_dis: 20
     capture_step: 8
     collision_dis: 3
