@@ -1,0 +1,116 @@
+tasks:
+  # num_hunters = 1
+  - {num_hunters: 2, world_size: 235.87778853510787, seed: 1627, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_026"], target_route_id: 0}
+  - {num_hunters: 3, world_size: 216.1279984512784, seed: 4027, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_023"], target_route_id: 0}
+  - {num_hunters: 5, world_size: 286.19135743227645, seed: 5527, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_029"], target_route_id: 0}
+  - {num_hunters: 1, world_size: 172.7084464744814, seed: 2127, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_018"], target_route_id: 0}
+  - {num_hunters: 1, world_size: 129.9687499637048, seed: 3127, target_policy_source: random, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["vert_trig"], target_route_id: 0}
+  - {num_hunters: 1, world_size: 202.07756828669372, seed: 4927, target_policy_source: random, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["ring"], target_route_id: 0}
+  - {num_hunters: 1, world_size: 269.3080576609956, seed: 6527, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_017"], target_route_id: 0}
+  - {num_hunters: 1, world_size: 275.6834864969005, seed: 8027, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_022"], target_route_id: 0}
+  - {num_hunters: 1, world_size: 236.75042771532856, seed: 8827, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_029"], target_route_id: 0}
+  - {num_hunters: 1, world_size: 225.57163086254695, seed: 9427, target_policy_source: random, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["square"], target_route_id: 0}
+
+  # num_hunters = 2
+  - {num_hunters: 2, world_size: 263.3522705704743, seed: 1527, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_013"], target_route_id: 0}
+  - {num_hunters: 2, world_size: 207.6129440845875, seed: 1927, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_030"], target_route_id: 0}
+  - {num_hunters: 2, world_size: 278.19374588983925, seed: 2227, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_020"], target_route_id: 0}
+  - {num_hunters: 2, world_size: 201.27174973867722, seed: 2327, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_022"], target_route_id: 0}
+  - {num_hunters: 2, world_size: 234.86063252300923, seed: 2827, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_024"], target_route_id: 0}
+  - {num_hunters: 2, world_size: 266.75996385070357, seed: 4827, target_policy_source: random, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["hori_trig"], target_route_id: 0}
+  - {num_hunters: 2, world_size: 146.26696259514364, seed: 6327, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_008"], target_route_id: 0}
+  - {num_hunters: 2, world_size: 119.28614818286249, seed: 6827, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_011"], target_route_id: 0}
+  - {num_hunters: 2, world_size: 286.36358278185395, seed: 7127, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_013"], target_route_id: 0}
+  - {num_hunters: 2, world_size: 104.59554092573921, seed: 7427, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_010"], target_route_id: 0}
+  - {num_hunters: 2, world_size: 215.29621033084328, seed: 7527, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_030"], target_route_id: 0}
+  - {num_hunters: 2, world_size: 128.37846686329829, seed: 10627, target_policy_source: patrol, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["rnd1"], target_route_id: 0}
+
+  # num_hunters = 3
+  - {num_hunters: 3, world_size: 283.2961395591982, seed: 3927, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_023"], target_route_id: 0}
+  - {num_hunters: 3, world_size: 158.13602966730772, seed: 4427, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_027"], target_route_id: 0}
+  - {num_hunters: 3, world_size: 256.6875916457342, seed: 4527, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_003"], target_route_id: 0}
+  - {num_hunters: 3, world_size: 141.39712964535886, seed: 5227, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_028"], target_route_id: 0}
+  - {num_hunters: 3, world_size: 143.74470678777834, seed: 5727, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_028"], target_route_id: 0}
+  - {num_hunters: 3, world_size: 177.99428742052152, seed: 5827, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_006"], target_route_id: 0}
+  - {num_hunters: 3, world_size: 236.909458131233, seed: 6927, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_001"], target_route_id: 0}
+  - {num_hunters: 3, world_size: 201.32533954613046, seed: 7027, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_001"], target_route_id: 0}
+  - {num_hunters: 3, world_size: 123.65659033852626, seed: 8427, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_002"], target_route_id: 0}
+  - {num_hunters: 3, world_size: 107.60176278682533, seed: 9227, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_030"], target_route_id: 0}
+  - {num_hunters: 3, world_size: 278.7595391352651, seed: 10027, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_026"], target_route_id: 0}
+  - {num_hunters: 3, world_size: 299.76226077006214, seed: 10327, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_001"], target_route_id: 0}
+
+  # num_hunters = 4
+  - {num_hunters: 4, world_size: 184.12299123909082, seed: 1327, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_030"], target_route_id: 0}
+  - {num_hunters: 4, world_size: 263.6264399422522, seed: 2627, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_003"], target_route_id: 0}
+  - {num_hunters: 4, world_size: 124.16378203194537, seed: 4127, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_010"], target_route_id: 0}
+  - {num_hunters: 4, world_size: 224.1568844258972, seed: 6627, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_002"], target_route_id: 0}
+  - {num_hunters: 4, world_size: 212.56627778425917, seed: 6727, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_013"], target_route_id: 0}
+  - {num_hunters: 4, world_size: 214.52586657500723, seed: 10427, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_014"], target_route_id: 0}
+  - {num_hunters: 4, world_size: 279.7824372245566, seed: 10827, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_005"], target_route_id: 0}
+  - {num_hunters: 4, world_size: 269.46181000165814, seed: 11027, target_policy_source: random, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["square"], target_route_id: 0}
+
+  # num_hunters = 5
+  - {num_hunters: 5, world_size: 191.5311156463797, seed: 3527, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_015"], target_route_id: 0}
+  - {num_hunters: 5, world_size: 130.95218092967733, seed: 4227, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_017"], target_route_id: 0}
+  - {num_hunters: 5, world_size: 165.20854966932075, seed: 5027, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_023"], target_route_id: 0}
+  - {num_hunters: 5, world_size: 112.57581563870687, seed: 7227, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_011"], target_route_id: 0}
+  - {num_hunters: 5, world_size: 293.08655115281044, seed: 7327, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_021"], target_route_id: 0}
+  - {num_hunters: 5, world_size: 163.77650437594366, seed: 8227, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_021"], target_route_id: 0}
+  - {num_hunters: 5, world_size: 145.65115872526468, seed: 8927, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_004"], target_route_id: 0}
+  - {num_hunters: 5, world_size: 195.76865943950378, seed: 9027, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_029"], target_route_id: 0}
+  - {num_hunters: 5, world_size: 272.2426074757865, seed: 9727, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_016"], target_route_id: 0}
+  - {num_hunters: 5, world_size: 131.65884558560936, seed: 9927, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_007"], target_route_id: 0}
+  - {num_hunters: 5, world_size: 209.34490521402398, seed: 10227, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_018"], target_route_id: 0}
+  - {num_hunters: 5, world_size: 126.80094983094051, seed: 10927, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_017"], target_route_id: 0}
+
+  # num_hunters = 6
+  - {num_hunters: 6, world_size: 290.2685158130865, seed: 1227, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_027"], target_route_id: 0}
+  - {num_hunters: 6, world_size: 152.6887379048992, seed: 6027, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_006"], target_route_id: 0}
+  - {num_hunters: 6, world_size: 221.45101223249384, seed: 7627, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_024"], target_route_id: 0}
+  - {num_hunters: 6, world_size: 245.4253285501662, seed: 8127, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_013"], target_route_id: 0}
+  - {num_hunters: 6, world_size: 212.17256792805364, seed: 8327, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_007"], target_route_id: 0}
+  - {num_hunters: 6, world_size: 105.7588345181496, seed: 8527, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_014"], target_route_id: 0}
+  - {num_hunters: 6, world_size: 176.8211832302543, seed: 8627, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_021"], target_route_id: 0}
+  - {num_hunters: 6, world_size: 288.84556833919544, seed: 9127, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_003"], target_route_id: 0}
+  - {num_hunters: 6, world_size: 250.90638956888338, seed: 9327, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_028"], target_route_id: 0}
+  - {num_hunters: 6, world_size: 227.40227946275502, seed: 9827, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_024"], target_route_id: 0}
+  - {num_hunters: 6, world_size: 152.28881435158814, seed: 10727, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_030"], target_route_id: 0}
+
+  # num_hunters = 7
+  - {num_hunters: 7, world_size: 169.53157034503272, seed: 1727, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_011"], target_route_id: 0}
+  - {num_hunters: 7, world_size: 227.5434912388323, seed: 1827, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_027"], target_route_id: 0}
+  - {num_hunters: 7, world_size: 151.7286864585842, seed: 2427, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_028"], target_route_id: 0}
+  - {num_hunters: 7, world_size: 128.48251086788343, seed: 2727, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_025"], target_route_id: 0}
+  - {num_hunters: 7, world_size: 209.62970674008426, seed: 2927, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_014"], target_route_id: 0}
+  - {num_hunters: 7, world_size: 140.50626798625908, seed: 3027, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_022"], target_route_id: 0}
+  - {num_hunters: 7, world_size: 232.77950869093272, seed: 3427, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_030"], target_route_id: 0}
+  - {num_hunters: 7, world_size: 288.0275563363658, seed: 3727, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_025"], target_route_id: 0}
+  - {num_hunters: 7, world_size: 261.5989985295181, seed: 4627, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_019"], target_route_id: 0}
+  - {num_hunters: 7, world_size: 291.76490024646216, seed: 4727, target_policy_source: patrol, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["square"], target_route_id: 0}
+  - {num_hunters: 7, world_size: 139.09878678207167, seed: 5427, target_policy_source: patrol, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["vert_trig"], target_route_id: 0}
+  - {num_hunters: 7, world_size: 176.63706884519644, seed: 5927, target_policy_source: random, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["rnd1"], target_route_id: 0}
+  - {num_hunters: 7, world_size: 193.54007568502766, seed: 6127, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_013"], target_route_id: 0}
+  - {num_hunters: 7, world_size: 221.55713024085196, seed: 7727, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_015"], target_route_id: 0}
+  - {num_hunters: 7, world_size: 237.29269262276122, seed: 7827, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_002"], target_route_id: 0}
+  - {num_hunters: 7, world_size: 289.4127246988053, seed: 7927, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_013"], target_route_id: 0}
+  - {num_hunters: 7, world_size: 254.98155225099333, seed: 8727, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_009"], target_route_id: 0}
+  - {num_hunters: 7, world_size: 290.19998131716807, seed: 9627, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_018"], target_route_id: 0}
+  - {num_hunters: 7, world_size: 227.823263663907, seed: 10127, target_policy_source: random, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["vert_trig"], target_route_id: 0}
+  - {num_hunters: 7, world_size: 292.62866075499034, seed: 10527, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_029"], target_route_id: 0}
+  - {num_hunters: 7, world_size: 262.42566372807346, seed: 11127, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_017"], target_route_id: 0}
+
+  # num_hunters = 8
+  - {num_hunters: 8, world_size: 100.50696822137277, seed: 1427, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_010"], target_route_id: 0}
+  - {num_hunters: 8, world_size: 275.2949619960711, seed: 2027, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_004"], target_route_id: 0}
+  - {num_hunters: 8, world_size: 203.5974469858008, seed: 2527, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_027"], target_route_id: 0}
+  - {num_hunters: 8, world_size: 284.3019443747961, seed: 3227, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_018"], target_route_id: 0}
+  - {num_hunters: 8, world_size: 202.25335622832677, seed: 3327, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_024"], target_route_id: 0}
+  - {num_hunters: 8, world_size: 151.76623084086282, seed: 3627, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_027"], target_route_id: 0}
+  - {num_hunters: 8, world_size: 119.33250903276593, seed: 3827, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_018"], target_route_id: 0}
+  - {num_hunters: 8, world_size: 209.16072163422058, seed: 4327, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_003"], target_route_id: 0}
+  - {num_hunters: 8, world_size: 214.32364377171697, seed: 5127, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_024"], target_route_id: 0}
+  - {num_hunters: 8, world_size: 235.6996606452505, seed: 5327, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_009"], target_route_id: 0}
+  - {num_hunters: 8, world_size: 196.7681567533992, seed: 5627, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_007"], target_route_id: 0}
+  - {num_hunters: 8, world_size: 124.02112413533305, seed: 6227, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_023"], target_route_id: 0}
+  - {num_hunters: 8, world_size: 181.6004925147595, seed: 6427, target_policy_source: patrol, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_016"], target_route_id: 0}
+  - {num_hunters: 8, world_size: 294.0387237397413, seed: 9527, target_policy_source: patrol, target_patrol_path: datasets/patrol_routes.json, target_patrol_names: ["hori_trig"], target_route_id: 0}

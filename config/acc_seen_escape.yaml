@@ -1,31 +1,31 @@
 exp:
   algorithm_name: rmappo
-  experiment_name: acc5v1_Tk4_Escape
+  experiment_name: PatrolPolicy_v3v1_Escape
   seed: 1
   num_env_steps: 2000000 # total environment steps to train
 
 # Environment settings (common)
 env:
-  env_name: Pursuit-Zone-Coobs
+  env_name: Pursuit-TgtNoLrn
   world_size: 200
   episode_length: 400 # max steps per episode
-  max_hunters_num: 5
+  max_hunters_num: 3
   hunters_in_zone: false
 
   neighbor_N: 3
   coord_summary_obs_enable: false
   coord_topk_hunters: 4
 
-  target_policy_source: learn # Choices: ["learn", "patrol", "Random"]
+  target_policy_source: patrol # Choices: ["learn", "patrol", "random", "greedy", "escape"]
   target_switch_interval: 10
 
 Hunter:
   perception_radius: -1
-  control_mode: acceleration  # Choices: ["acceleration", "velocity"]
+  control_mode: velocity  # Choices: ["acceleration", "velocity"]
 
 Target: 
   perception_radius: -1
-  control_mode: acceleration
+  control_mode: velocity
 
 # UAV pursuit scenario settings
 reward:
@@ -40,7 +40,7 @@ reward:
   base_near_scale: 1.0
   base_streak_scale: 0.1
   base_streak_cap: 30
-  base_reward_topk_enable: true
+  base_reward_topk_enable: false
   base_reward_topk_k: 4
   base_reward_non_topk_scale: 0.1
 
@@ -74,23 +74,23 @@ optim:
 
 # Learning rate schedule
 schedule:
-  use_linear_lr_decay: true
+  use_linear_lr_decay: false
 
 logging:
   log_gif: false         # 训练阶段是否按规则保存GIF
 
 eval:
   eval_episode_length: 600
-  fixed_tasks_file: config/eval_tasks/patrol_tasks_h8_n100.yaml
+  fixed_tasks_file: config/eval_tasks/patrol_tasks_h8_p2_n100.yaml
 
 domain_randomization:
   train_split:
     enable: false
     regen_interval_episode: 20
     regen_prob: 1.0
-    hunter_count_choices: [1, 2, 3, 4, 5]
+    hunter_count_choices: [1, 2, 3]
     seed_range: [1, 99999]
-    target_policy_choices: ["learn", "patrol", "random"]
+    target_policy_choices: ["patrol"]
     patrol_name_choices: ["all"]
 
 # Pretrained model

@@ -128,6 +128,8 @@ class BaseAgent(object):
         step_count: int,
         action_from_policy: Optional[np.ndarray],
         rng: np.random.RandomState,
+        hunters: Optional[List["HunterAgent"]] = None,
+        active_hunter_mask: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         输入:
@@ -135,6 +137,8 @@ class BaseAgent(object):
             action_from_policy (Optional[np.ndarray]):
                 learn策略对应网络输出，shape=(2,), 归一化动作。
             rng (np.random.RandomState): 随机数发生器。
+            hunters (Optional[List[HunterAgent]]): Hunter列表（基类默认不使用）。
+            active_hunter_mask (Optional[np.ndarray]): Hunter激活掩码（基类默认不使用）。
         输出:
             np.ndarray: shape=(2,), 归一化动作。
         """
@@ -189,7 +193,7 @@ class BaseAgent(object):
             desired_velocity = u * self.max_speed
             bypass_turn_limit = (
                 self.role == "target"
-                and self.policy_type in ("random", "patrol")
+                and self.policy_type in ("random", "patrol", "greedy", "escape")
             )
             self.velocity = desired_velocity if bypass_turn_limit else self._apply_turn_limit(self.velocity, desired_velocity)
 
@@ -393,10 +397,18 @@ class TargetAgent(BaseAgent):
         escape_gap_hunter_reward_scale: float = 0.0,
         escape_gap_target_reward_scale: float = 0.0,
         escape_gap_min_speed: float = 0.2,
+        boundary_avoid_enable: bool = True,
+        boundary_influence_ratio: float = 0.30,
+        boundary_enter_ratio: float = 0.15,
+        boundary_exit_ratio: float = 0.22,
+        boundary_wall_gain: float = 1.2,
+        boundary_corner_tangent_gain: float = 0.8,
+        boundary_smooth_alpha: float = 0.25,
+        boundary_lookahead_steps: int = 5,
     ):
         """
         功能:
-            初始化Target智能体，支持learn/patrol/random三类策略。
+            初始化Target智能体，支持learn/patrol/random/greedy/escape策略。
         输入:
             agent_id (int): Target编号。
             max_speed (float): 最大速度（米/秒）。
@@ -405,7 +417,7 @@ class TargetAgent(BaseAgent):
             max_acc (float): acceleration模式下最大加速度（米/秒²）。
             max_turn_angle (float): velocity模式下最大转角（度）。
             min_turn_limit_velo (float): 速度超过该阈值时才启用转角限制（米/秒）。
-            policy_type (str): learn/patrol/random。
+            policy_type (str): learn/patrol/random/greedy/escape。
             policy_net (Any): learn模式下可选策略网络。
             action_update_interval (int): random策略重采样间隔（步）。
             patrol_waypoints (Optional[List[np.ndarray]]): 巡逻航点（全局坐标，米）。
@@ -418,6 +430,14 @@ class TargetAgent(BaseAgent):
             escape_gap_hunter_reward_scale (float): Hunter侧escape_gap_reward缩放系数。
             escape_gap_target_reward_scale (float): Target侧escape_gap_reward缩放系数。
             escape_gap_min_speed (float): 计算逃脱方向奖励的最低Target速度阈值（米/秒）。
+            boundary_avoid_enable (bool): 是否启用边界软约束。
+            boundary_influence_ratio (float): 软约束生效半径占world_size比例。
+            boundary_enter_ratio (float): 边界保护进入阈值占world_size比例。
+            boundary_exit_ratio (float): 边界保护退出阈值占world_size比例。
+            boundary_wall_gain (float): 边界法向修正增益。
+            boundary_corner_tangent_gain (float): 角落切向滑移增益。
+            boundary_smooth_alpha (float): 动作EMA平滑系数（0~1）。
+            boundary_lookahead_steps (int): 多步前瞻步数。
         输出:
             无。
         """
@@ -446,6 +466,16 @@ class TargetAgent(BaseAgent):
         self.escape_gap_hunter_reward_scale = float(max(0.0, escape_gap_hunter_reward_scale))
         self.escape_gap_target_reward_scale = float(max(0.0, escape_gap_target_reward_scale))
         self.escape_gap_min_speed = float(max(0.0, escape_gap_min_speed))
+        self.boundary_avoid_enable = bool(boundary_avoid_enable)
+        self.boundary_influence_ratio = float(max(0.01, boundary_influence_ratio))
+        self.boundary_enter_ratio = float(max(0.0, boundary_enter_ratio))
+        self.boundary_exit_ratio = float(max(self.boundary_enter_ratio, boundary_exit_ratio))
+        self.boundary_wall_gain = float(max(0.0, boundary_wall_gain))
+        self.boundary_corner_tangent_gain = float(max(0.0, boundary_corner_tangent_gain))
+        self.boundary_smooth_alpha = float(np.clip(boundary_smooth_alpha, 0.0, 1.0))
+        self.boundary_lookahead_steps = int(max(1, boundary_lookahead_steps))
+        self.boundary_mode_active = False
+        self.last_boundary_action = np.zeros(2, dtype=np.float32)
         self.route_episode_count = 0
         self.route_index = 0
         self.patrol_index = 0
@@ -489,6 +519,8 @@ class TargetAgent(BaseAgent):
         self.last_escape_gap_open_score = 0.0
         self.last_escape_gap_hunter_direction_score = 0.0
         self.last_escape_gap_target_direction_score = 0.0
+        self.boundary_mode_active = False
+        self.last_boundary_action = np.zeros(2, dtype=np.float32)
         if force_route_episode_count is not None:
             self.route_episode_count = int(force_route_episode_count)
         else:
@@ -514,6 +546,8 @@ class TargetAgent(BaseAgent):
         step_count: int,
         action_from_policy: Optional[np.ndarray],
         rng: np.random.RandomState,
+        hunters: Optional[List[HunterAgent]] = None,
+        active_hunter_mask: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         功能:
@@ -522,6 +556,8 @@ class TargetAgent(BaseAgent):
             step_count (int): 当前环境步。
             action_from_policy (Optional[np.ndarray]): learn策略动作。
             rng (np.random.RandomState): 随机数生成器。
+            hunters (Optional[List[HunterAgent]]): Hunter列表。
+            active_hunter_mask (Optional[np.ndarray]): Hunter激活掩码，shape=(num_hunters,)。
         输出:
             np.ndarray: shape=(2,), 归一化动作。
         """
@@ -529,47 +565,265 @@ class TargetAgent(BaseAgent):
             return self._patrol_action()
         if self.policy_type == "random":
             raw_random_action = super().select_action(step_count, action_from_policy, rng)
-            return self._random_action_with_boundary_avoidance(raw_random_action)
+            return self._action_with_boundary_avoidance(raw_random_action)
+        if self.policy_type == "greedy":
+            return self._greedy_action(hunters=hunters, active_hunter_mask=active_hunter_mask)
+        if self.policy_type == "escape":
+            return self._escape_action(hunters=hunters, active_hunter_mask=active_hunter_mask)
         return super().select_action(step_count, action_from_policy, rng)
+
+    def _action_with_boundary_avoidance(self, base_action: np.ndarray) -> np.ndarray:
+        """
+        功能:
+            对动作做边界连续软约束修正（含滞回、角落切向滑移和动作平滑）。
+        输入:
+            base_action (np.ndarray): shape=(2,), 原始动作（归一化）。
+        输出:
+            np.ndarray: shape=(2,), 修正后的动作（归一化）。
+        """
+        base_action = np.clip(np.asarray(base_action, dtype=np.float32), -1.0, 1.0)
+        if not bool(self.boundary_avoid_enable):
+            self.last_boundary_action = base_action.copy()
+            return base_action
+
+        # Step 1: 多步前瞻边界距离，提前介入避免“撞墙后急拐”。
+        min_boundary_dist, ref_pos = self._predict_min_boundary_distance(
+            base_action=base_action,
+            horizon_steps=int(self.boundary_lookahead_steps),
+        )
+        world_size = float(max(1e-6, self.world_size))
+        influence_dist = float(np.clip(self.boundary_influence_ratio, 0.01, 1.0) * world_size)
+        enter_dist = float(np.clip(self.boundary_enter_ratio, 0.0, 1.0) * world_size)
+        exit_dist = float(np.clip(self.boundary_exit_ratio, 0.0, 1.0) * world_size)
+        exit_dist = max(exit_dist, enter_dist)
+
+        # Step 2: 滞回切换，防止阈值附近来回抖动。
+        if self.boundary_mode_active:
+            if min_boundary_dist >= exit_dist:
+                self.boundary_mode_active = False
+        else:
+            if min_boundary_dist <= enter_dist:
+                self.boundary_mode_active = True
+        need_avoid = bool(self.boundary_mode_active or (min_boundary_dist < influence_dist))
+        if not need_avoid:
+            out = self._smooth_action(base_action)
+            self.last_boundary_action = out.copy()
+            return out
+
+        # Step 3: 连续墙面斥力 + 角落切向滑移，避免“中心/边缘”二值切换。
+        wall_vec, corner_weight = self._build_wall_avoidance_vector(
+            ref_pos=ref_pos,
+            influence_dist=influence_dist,
+        )
+        wall_norm = float(np.linalg.norm(wall_vec))
+        if wall_norm <= 1e-8:
+            out = self._smooth_action(base_action)
+            self.last_boundary_action = out.copy()
+            return out
+
+        wall_dir = wall_vec / wall_norm
+        adjusted = base_action + float(self.boundary_wall_gain) * wall_dir
+        if corner_weight > 0.0 and float(self.boundary_corner_tangent_gain) > 0.0:
+            tan_1 = np.array([-wall_dir[1], wall_dir[0]], dtype=np.float32)
+            tan_2 = -tan_1
+            tan_dir = tan_1 if float(np.dot(tan_1, base_action)) >= float(np.dot(tan_2, base_action)) else tan_2
+            adjusted = adjusted + float(self.boundary_corner_tangent_gain) * float(corner_weight) * tan_dir
+
+        out = np.clip(adjusted, -1.0, 1.0).astype(np.float32)
+        out = self._smooth_action(out)
+        self.last_boundary_action = out.copy()
+        return out
+
+    def _smooth_action(self, action: np.ndarray) -> np.ndarray:
+        """
+        功能:
+            对动作施加EMA平滑，减少边界附近方向抖动。
+        输入:
+            action (np.ndarray): 原始动作，shape=(2,)。
+        输出:
+            np.ndarray: 平滑后动作，shape=(2,)。
+        """
+        alpha = float(np.clip(self.boundary_smooth_alpha, 0.0, 1.0))
+        if alpha <= 0.0:
+            return np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0).astype(np.float32)
+        mixed = (1.0 - alpha) * np.asarray(self.last_boundary_action, dtype=np.float32) + alpha * np.asarray(action, dtype=np.float32)
+        return np.clip(mixed, -1.0, 1.0).astype(np.float32)
+
+    def _predict_min_boundary_distance(self, base_action: np.ndarray, horizon_steps: int):
+        """
+        功能:
+            预测若保持当前动作执行多步时，轨迹到边界的最小余量。
+        输入:
+            base_action (np.ndarray): 归一化动作，shape=(2,)。
+            horizon_steps (int): 前瞻步数。
+        输出:
+            tuple[float, np.ndarray]: (最小边界余量(米), 对应位置shape=(2,))。
+        """
+        dt = float(max(1e-6, self.control_dt))
+        ws = float(max(1e-6, self.world_size))
+        action = np.clip(np.asarray(base_action, dtype=np.float32), -1.0, 1.0)
+        pos = np.asarray(self.position, dtype=np.float32).copy()
+        vel = np.asarray(self.velocity, dtype=np.float32).copy()
+
+        min_dist = float("inf")
+        min_pos = pos.copy()
+        for _ in range(int(max(1, horizon_steps))):
+            if self.control_mode == "acceleration":
+                vel = vel + action * float(self.max_acc) * dt
+                speed = float(np.linalg.norm(vel))
+                if speed > float(self.max_speed) and speed > 1e-8:
+                    vel = vel / speed * float(self.max_speed)
+            else:
+                vel = action * float(self.max_speed)
+            pos = pos + vel * dt
+            dist = float(max(0.0, ws - max(abs(float(pos[0])), abs(float(pos[1])))))
+            if dist < min_dist:
+                min_dist = dist
+                min_pos = pos.copy()
+        return float(min_dist), np.asarray(min_pos, dtype=np.float32)
+
+    def _build_wall_avoidance_vector(self, ref_pos: np.ndarray, influence_dist: float):
+        """
+        功能:
+            计算参考位置下的墙面斥力向量与角落权重。
+        输入:
+            ref_pos (np.ndarray): 参考位置，shape=(2,)。
+            influence_dist (float): 边界影响范围（米）。
+        输出:
+            tuple[np.ndarray, float]: (法向斥力向量, 角落权重[0,1])。
+        """
+        ws = float(max(1e-6, self.world_size))
+        p = np.asarray(ref_pos, dtype=np.float32)
+        inf = float(max(1e-6, influence_dist))
+
+        wall_dists = [
+            float(ws - float(p[0])),  # right
+            float(ws + float(p[0])),  # left
+            float(ws - float(p[1])),  # top
+            float(ws + float(p[1])),  # bottom
+        ]
+        wall_normals = [
+            np.array([-1.0, 0.0], dtype=np.float32),
+            np.array([1.0, 0.0], dtype=np.float32),
+            np.array([0.0, -1.0], dtype=np.float32),
+            np.array([0.0, 1.0], dtype=np.float32),
+        ]
+
+        wall_vec = np.zeros(2, dtype=np.float32)
+        weights = []
+        for d, normal in zip(wall_dists, wall_normals):
+            ratio = float(np.clip((inf - float(d)) / inf, 0.0, 1.0))
+            weight = ratio * ratio
+            weights.append(weight)
+            wall_vec = wall_vec + float(weight) * normal
+
+        sorted_weights = sorted(weights, reverse=True)
+        corner_weight = float(np.clip(sorted_weights[1], 0.0, 1.0)) if len(sorted_weights) >= 2 else 0.0
+        return wall_vec, corner_weight
 
     def _random_action_with_boundary_avoidance(self, random_action: np.ndarray) -> np.ndarray:
         """
         功能:
-            random策略下对动作做边界安全修正；若预测下一时刻靠近边界，则叠加朝向中心的最大径向分量。
+            random策略边界修正兼容接口（内部复用通用边界修正函数）。
         输入:
             random_action (np.ndarray): shape=(2,), 原始随机动作（归一化）。
         输出:
-            np.ndarray: shape=(2,), 修正后的随机动作（归一化）。
+            np.ndarray: shape=(2,), 修正后的动作（归一化）。
         """
-        # Step 1: 预测下一时刻位置
-        base_action = np.clip(np.asarray(random_action, dtype=np.float32), -1.0, 1.0)
-        if self.control_mode == "acceleration":
-            predicted_vel = self.velocity + base_action * float(self.max_acc) * float(self.control_dt)
-            speed = float(np.linalg.norm(predicted_vel))
-            if speed > float(self.max_speed) and speed > 1e-8:
-                predicted_vel = predicted_vel / speed * float(self.max_speed)
+        return self._action_with_boundary_avoidance(random_action)
+
+    def _greedy_action(
+        self,
+        hunters: Optional[List[HunterAgent]],
+        active_hunter_mask: Optional[np.ndarray],
+    ) -> np.ndarray:
+        """
+        功能:
+            greedy策略：选取最近Hunter并朝其反方向运动，再叠加边界兜底修正。
+        输入:
+            hunters (Optional[List[HunterAgent]]): Hunter列表。
+            active_hunter_mask (Optional[np.ndarray]): Hunter激活掩码。
+        输出:
+            np.ndarray: shape=(2,), 归一化动作。
+        """
+        if hunters is None or len(hunters) == 0:
+            return self._default_hold_action()
+
+        nearest_vec = None
+        nearest_dist = float("inf")
+        for hid, hunter in enumerate(hunters):
+            is_active = True
+            if active_hunter_mask is not None and hid < len(active_hunter_mask):
+                is_active = bool(active_hunter_mask[hid])
+            if (not is_active) or (not bool(hunter.alive)):
+                continue
+            vec = np.asarray(self.position, dtype=np.float32) - np.asarray(hunter.position, dtype=np.float32)
+            dist = float(np.linalg.norm(vec))
+            if dist < nearest_dist:
+                nearest_dist = dist
+                nearest_vec = vec
+
+        if nearest_vec is None:
+            return self._default_hold_action()
+
+        vec_norm = float(np.linalg.norm(nearest_vec))
+        if vec_norm <= 1e-8:
+            return self._default_hold_action()
         else:
-            predicted_vel = base_action * float(self.max_speed)
-        p_next = self.position + predicted_vel * float(self.control_dt)
+            away_dir = (nearest_vec / vec_norm).astype(np.float32)
+        return self._action_with_boundary_avoidance(away_dir)
 
-        # Step 2: 下一时刻进入边界风险区时，叠加朝向中心的最大径向动作分量
-        boundary_dist = float(max(0.0, self.world_size - max(abs(float(p_next[0])), abs(float(p_next[1])))))
-        if boundary_dist >= float(self.safe_dis):
-            return base_action
-
-        center_vec = -np.asarray(p_next, dtype=np.float32)
-        center_norm = float(np.linalg.norm(center_vec))
-        if center_norm <= 1e-8:
-            return base_action
-        center_dir = center_vec / center_norm
-        if self.control_mode == "acceleration":
-            radial_action = np.clip(center_dir, -1.0, 1.0).astype(np.float32)
+    def _escape_action(
+        self,
+        hunters: Optional[List[HunterAgent]],
+        active_hunter_mask: Optional[np.ndarray],
+    ) -> np.ndarray:
+        """
+        功能:
+            escape策略：计算最大潜在可逃脱空间夹角，朝夹角中线方向运动，再叠加边界兜底修正。
+        输入:
+            hunters (Optional[List[HunterAgent]]): Hunter列表。
+            active_hunter_mask (Optional[np.ndarray]): Hunter激活掩码。
+        输出:
+            np.ndarray: shape=(2,), 归一化动作。
+        """
+        safe_hunters = [] if hunters is None else list(hunters)
+        if active_hunter_mask is None:
+            safe_mask = np.ones(len(safe_hunters), dtype=bool)
         else:
-            radial_action = np.clip(center_dir, -1.0, 1.0).astype(np.float32)
-        adjusted_action = base_action + radial_action
+            safe_mask = np.asarray(active_hunter_mask, dtype=bool)
 
-        # Step 3: 裁剪后返回有效动作
-        return np.clip(adjusted_action, -1.0, 1.0).astype(np.float32)
+        gap_info = self.compute_max_escape_gap(safe_hunters, safe_mask)
+        is_valid = bool(gap_info.get("metric_valid", False)) and int(gap_info.get("active_alive_hunters", 0)) > 1
+        if (not is_valid) or float(gap_info.get("max_gap_angle", 0.0)) <= 1e-6:
+            return self._default_hold_action()
+
+        encircling_hunter_ids = list(gap_info.get("encircling_hunter_ids", []))
+        if len(encircling_hunter_ids) <= 1:
+            return self._default_hold_action()
+
+        theta = float(gap_info.get("max_gap_center_angle", 0.0))
+        escape_dir = np.array([np.cos(theta), np.sin(theta)], dtype=np.float32)
+        return self._action_with_boundary_avoidance(escape_dir)
+
+    def _default_hold_action(self) -> np.ndarray:
+        """
+        功能:
+            greedy/escape无有效方向时的默认动作：
+            - acceleration模式：输出反向减速度使速度衰减到0；
+            - velocity模式：输出零速度动作。
+        输入:
+            无。
+        输出:
+            np.ndarray: shape=(2,), 归一化动作。
+        """
+        if self.control_mode == "acceleration":
+            speed = float(np.linalg.norm(self.velocity))
+            if speed <= 1e-8 or float(self.max_acc) <= 1e-8:
+                return np.zeros(2, dtype=np.float32)
+            brake_acc = -np.asarray(self.velocity, dtype=np.float32)
+            return np.clip(brake_acc / float(self.max_acc), -1.0, 1.0).astype(np.float32)
+        return np.zeros(2, dtype=np.float32)
 
     def _patrol_action(self) -> np.ndarray:
         """
@@ -926,6 +1180,16 @@ class UAVPursuitEnv(object):
         self.noisy_target_vel_std = float(env_cfg.noisy_target_vel_std)
         self.target_policy_source = str(env_cfg.target_policy_source).lower()
         self.target_switch_interval = int(env_cfg.target_switch_interval)
+        self.target_boundary_avoid_enable = bool(getattr(env_cfg, "target_boundary_avoid_enable", True))
+        self.target_boundary_influence_ratio = float(getattr(env_cfg, "target_boundary_influence_ratio", 0.30))
+        self.target_boundary_enter_ratio = float(getattr(env_cfg, "target_boundary_enter_ratio", 0.15))
+        self.target_boundary_exit_ratio = float(getattr(env_cfg, "target_boundary_exit_ratio", 0.22))
+        self.target_boundary_wall_gain = float(getattr(env_cfg, "target_boundary_wall_gain", 1.2))
+        self.target_boundary_corner_tangent_gain = float(
+            getattr(env_cfg, "target_boundary_corner_tangent_gain", 0.8)
+        )
+        self.target_boundary_smooth_alpha = float(getattr(env_cfg, "target_boundary_smooth_alpha", 0.25))
+        self.target_boundary_lookahead_steps = int(getattr(env_cfg, "target_boundary_lookahead_steps", 5))
 
         self.hunter_perception_radius = float(hunter_cfg.perception_radius)
         self.target_perception_radius = float(target_cfg.perception_radius)
@@ -1046,6 +1310,14 @@ class UAVPursuitEnv(object):
             escape_gap_hunter_reward_scale=float(escape_gap_hunter_reward_scale),
             escape_gap_target_reward_scale=float(escape_gap_target_reward_scale),
             escape_gap_min_speed=float(escape_gap_min_speed),
+            boundary_avoid_enable=bool(self.target_boundary_avoid_enable),
+            boundary_influence_ratio=float(self.target_boundary_influence_ratio),
+            boundary_enter_ratio=float(self.target_boundary_enter_ratio),
+            boundary_exit_ratio=float(self.target_boundary_exit_ratio),
+            boundary_wall_gain=float(self.target_boundary_wall_gain),
+            boundary_corner_tangent_gain=float(self.target_boundary_corner_tangent_gain),
+            boundary_smooth_alpha=float(self.target_boundary_smooth_alpha),
+            boundary_lookahead_steps=int(self.target_boundary_lookahead_steps),
         )
         self.patrol_routes = patrol_routes
         self.default_target_policy_source = str(self.target_policy_source)
@@ -1510,7 +1782,18 @@ class UAVPursuitEnv(object):
         selected_actions = []
         for i, agent in enumerate(self.agents):
             policy_action = raw_actions[i] if agent.policy_type == "learn" else None
-            selected_actions.append(agent.select_action(self.step_count, policy_action, self.rng))
+            if isinstance(agent, TargetAgent):
+                selected_actions.append(
+                    agent.select_action(
+                        self.step_count,
+                        policy_action,
+                        self.rng,
+                        hunters=self.hunters,
+                        active_hunter_mask=self.active_hunter_mask,
+                    )
+                )
+            else:
+                selected_actions.append(agent.select_action(self.step_count, policy_action, self.rng))
 
         # 步骤2：执行运动学更新
         for agent, action in zip(self.agents, selected_actions):

@@ -1,0 +1,6 @@
+tasks:
+  # num_hunters = 1
+  - {num_hunters: 2, world_size: 235.87778853510787, seed: 1627, target_policy_source: random, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_026"], target_route_id: 0}
+  - {num_hunters: 3, world_size: 216.1279984512784, seed: 4027, target_policy_source: greedy, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_023"], target_route_id: 0}
+  - {num_hunters: 5, world_size: 286.19135743227645, seed: 5527, target_policy_source: escape, target_patrol_path: datasets/rnd_patrol_routs.json, target_patrol_names: ["auto_029"], target_route_id: 0}
+  

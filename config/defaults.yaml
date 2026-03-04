@@ -38,6 +38,14 @@ env:
   target_patrol_path: datasets/patrol_routes.json
   target_patrol_names: ["square", "ring"]
   target_switch_interval: 10
+  target_boundary_avoid_enable: true
+  target_boundary_influence_ratio: 0.30
+  target_boundary_enter_ratio: 0.15
+  target_boundary_exit_ratio: 0.22
+  target_boundary_wall_gain: 1.2
+  target_boundary_corner_tangent_gain: 0.8
+  target_boundary_smooth_alpha: 0.25
+  target_boundary_lookahead_steps: 5
 
 Hunter:
   perception_radius: -1
@@ -46,7 +54,7 @@ Hunter:
   control_mode: acceleration  # Choices: ["acceleration", "velocity"]
   max_acc: 5
   max_turn_angle: 10
-  min_turn_limit_velo: 3.0
+  min_turn_limit_velo: 2.0
 
 Explorer:
   perception_radius: -1
@@ -59,7 +67,7 @@ Target:
   safe_dis: 15
   control_mode: acceleration
   max_acc: 5
-  max_turn_angle: 20
+  max_turn_angle: 30
   min_turn_limit_velo: 3.0
 
 reward:
@@ -151,7 +159,7 @@ schedule:
 # Save/log settings
 logging:
   save_interval: 40     # ckpts 保存episode间隔
-  log_interval: 10      # 打印中间结果episode间隔
+  log_interval: 1      # 打印中间结果episode间隔
   log_gif: true         # 训练阶段是否按规则保存GIF
   gif_frame_interval: 10      # GIF抽帧间隔
   gif_frame_duration: 0.3

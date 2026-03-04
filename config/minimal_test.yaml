@@ -1,22 +1,22 @@
 exp:
   algorithm_name: rmappo
-  experiment_name: vel5v1_Base
+  experiment_name: minimal_test
   seed: 1
-  num_env_steps: 2000000 # total environment steps to train
+  num_env_steps: 2000 # total environment steps to train
 
 # Environment settings (common)
 env:
-  env_name: Pursuit-Zone-Coobs
+  env_name: Pursuit-TgtNoLrn
   world_size: 200
   episode_length: 400 # max steps per episode
-  max_hunters_num: 5
+  max_hunters_num: 3
   hunters_in_zone: false
 
   neighbor_N: 3
   coord_summary_obs_enable: false
   coord_topk_hunters: 4
 
-  target_policy_source: learn # Choices: ["learn", "patrol", "Random"]
+  target_policy_source: escape # Choices: ["learn", "patrol", "random", "greedy", "escape"]
   target_switch_interval: 10
 
 Hunter:
@@ -31,8 +31,8 @@ Target:
 reward:
   # Collision Penalty
   target_collision_penalty: 30.0
-  collision_penalty_k: 20.0
-  collision_penalty_cap: 200.0
+  collision_penalty_k: 5.0
+  collision_penalty_cap: 20.0
   safe_zone_penalty_scale: 0.1
   
   # Base chase reward
@@ -45,7 +45,7 @@ reward:
   base_reward_non_topk_scale: 0.1
 
   # Escape Gap
-  escape_gap_enable: false
+  escape_gap_enable: true
   escape_gap_hunter_reward_scale: 1.0
   escape_gap_target_reward_scale: 0.3
   escape_radius: 35.0
@@ -81,16 +81,16 @@ logging:
 
 eval:
   eval_episode_length: 600
-  fixed_tasks_file: config/eval_tasks/patrol_tasks_h8_n100.yaml
+  fixed_tasks_file: config/eval_tasks/eval_p3.yaml
 
 domain_randomization:
   train_split:
     enable: false
     regen_interval_episode: 20
     regen_prob: 1.0
-    hunter_count_choices: [1, 2, 3, 4, 5]
+    hunter_count_choices: [1, 2, 3]
     seed_range: [1, 99999]
-    target_policy_choices: ["learn", "patrol", "random"]
+    target_policy_choices: ["patrol"]
     patrol_name_choices: ["all"]
 
 # Pretrained model
