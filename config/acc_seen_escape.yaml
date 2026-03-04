@@ -1,8 +1,9 @@
 exp:
   algorithm_name: rmappo
-  experiment_name: PatrolPolicy_v3v1_Escape
+  experiment_name: RoleShareBuffer_PatrolPolicy_v3v1_Escape
   seed: 1
   num_env_steps: 2000000 # total environment steps to train
+  role_buffer_mode: role_shared  # Choices: ["separate", "role_shared"]
 
 # Environment settings (common)
 env:

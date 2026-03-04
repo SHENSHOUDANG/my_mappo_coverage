@@ -15,6 +15,7 @@ from itertools import chain
 import argparse
 import csv
 import shutil
+import copy
 
 import numpy as np
 import torch
@@ -88,6 +89,13 @@ class RoleBasedRunner(object):
         self.algorithm_name = str(self.cfg.exp.algorithm_name)
         self.experiment_name = str(self.cfg.exp.experiment_name)
         self.env_name = str(self.cfg.env.env_name)
+        self.role_buffer_mode = str(getattr(self.cfg.exp, "role_buffer_mode", "separate")).lower()
+        if self.role_buffer_mode not in ("separate", "role_shared"):
+            raise ValueError(
+                "Unsupported exp.role_buffer_mode: {} (choices: separate, role_shared)".format(
+                    str(self.role_buffer_mode)
+                )
+            )
 
         # Step 3: 创建日志/模型目录
         self.log_dir = str(self.run_dir / "logs")
@@ -145,6 +153,7 @@ class RoleBasedRunner(object):
             )
         )
         print("[GIFConfig] log_gif(train_stage)={}".format(bool(self.log_gif)))
+        print("[BufferMode] role_buffer_mode={}".format(str(self.role_buffer_mode)))
 
         # Step 4: 仅在算法组件初始化时构建flat args
         self.flat_args = self._build_flat_args_for_algorithm()
@@ -159,6 +168,9 @@ class RoleBasedRunner(object):
         self.controlled_agents = list(range(self.train_max_hunters_num))
         if self.target_trainable:
             self.controlled_agents.append(self.target_index)
+        self.role_to_agents = {"hunter": list(range(self.train_max_hunters_num))}
+        if self.target_trainable:
+            self.role_to_agents["target"] = [self.target_index]
 
         # Step 7: 构建角色级别policy与trainer
         self.role_policies = {}
@@ -198,6 +210,26 @@ class RoleBasedRunner(object):
                 share_obs_space,
                 self.envs.action_space[agent_id],
             )
+
+        # Step 9: 可选角色共享训练buffer（仅用于train阶段聚合更新）
+        self.role_shared_train_buffers = {}
+        if self.role_buffer_mode == "role_shared":
+            for role_name, agent_ids in self.role_to_agents.items():
+                if len(agent_ids) == 0:
+                    continue
+                rep_agent_id = int(agent_ids[0])
+                flat_args_role = copy.deepcopy(self.flat_args)
+                flat_args_role.n_rollout_threads = int(self.n_rollout_threads) * int(len(agent_ids))
+                if self.use_centralized_V:
+                    share_obs_space = self.envs.share_observation_space[rep_agent_id]
+                else:
+                    share_obs_space = self.envs.observation_space[rep_agent_id]
+                self.role_shared_train_buffers[role_name] = SeparatedReplayBuffer(
+                    flat_args_role,
+                    self.envs.observation_space[rep_agent_id],
+                    share_obs_space,
+                    self.envs.action_space[rep_agent_id],
+                )
 
     def _build_flat_args_for_algorithm(self):
         """
@@ -1031,6 +1063,19 @@ class RoleBasedRunner(object):
         输出:
             dict: 训练日志字典。
         """
+        if self.role_buffer_mode == "role_shared":
+            return self._train_with_role_shared_buffers()
+        return self._train_with_separate_buffers()
+
+    def _train_with_separate_buffers(self):
+        """
+        功能:
+            使用“每个agent一个buffer”的方式执行训练更新（现有默认行为）。
+        输入:
+            无。
+        输出:
+            dict: 按agent记录的训练日志字典。
+        """
         # Step 1: 按受控agent进行训练
         train_infos = {}
         for agent_id in self.controlled_agents:
@@ -1043,6 +1088,72 @@ class RoleBasedRunner(object):
                 float(np.mean(self.buffers[agent_id].rewards)) * self.episode_length
             )
             train_infos[f"{role}_{agent_id}"] = info
+        return train_infos
+
+    def _sync_role_shared_train_buffer(self, role_name, agent_ids):
+        """
+        功能:
+            将同角色的多个agent buffer沿线程维拼接到角色共享训练buffer。
+        输入:
+            role_name (str): 角色名称（hunter/target）。
+            agent_ids (list[int]): 该角色包含的agent id列表。
+        输出:
+            SeparatedReplayBuffer: 角色共享训练buffer（已填充本episode数据）。
+        """
+        role_buffer = self.role_shared_train_buffers[role_name]
+
+        def _concat_field(field_name):
+            field_vals = [getattr(self.buffers[int(aid)], field_name) for aid in agent_ids]
+            return np.concatenate(field_vals, axis=1)
+
+        # Step 1: 逐字段拼接
+        role_buffer.share_obs[...] = _concat_field("share_obs")
+        role_buffer.obs[...] = _concat_field("obs")
+        role_buffer.rnn_states[...] = _concat_field("rnn_states")
+        role_buffer.rnn_states_critic[...] = _concat_field("rnn_states_critic")
+        role_buffer.value_preds[...] = _concat_field("value_preds")
+        role_buffer.returns[...] = _concat_field("returns")
+        role_buffer.actions[...] = _concat_field("actions")
+        role_buffer.action_log_probs[...] = _concat_field("action_log_probs")
+        role_buffer.rewards[...] = _concat_field("rewards")
+        role_buffer.masks[...] = _concat_field("masks")
+        role_buffer.bad_masks[...] = _concat_field("bad_masks")
+        role_buffer.active_masks[...] = _concat_field("active_masks")
+        if role_buffer.available_actions is not None:
+            role_buffer.available_actions[...] = _concat_field("available_actions")
+
+        # Step 2: 保持step状态与完整episode对齐
+        role_buffer.step = int(self.buffers[int(agent_ids[0])].step)
+        return role_buffer
+
+    def _train_with_role_shared_buffers(self):
+        """
+        功能:
+            使用“同角色共享训练buffer”执行训练更新（每个角色每轮只更新一次）。
+        输入:
+            无。
+        输出:
+            dict: 按角色记录的训练日志字典。
+        """
+        train_infos = {}
+        for role_name, agent_ids in self.role_to_agents.items():
+            if len(agent_ids) == 0:
+                continue
+            trainer = self.role_trainers[role_name]
+            trainer.prep_training()
+            role_buffer = self._sync_role_shared_train_buffer(role_name, agent_ids)
+            info = trainer.train(role_buffer)
+
+            # Step 1: 角色奖励按该角色全部agent的reward均值统计。
+            role_rewards = [self.buffers[int(aid)].rewards for aid in agent_ids]
+            role_reward_mean = float(np.mean(np.concatenate(role_rewards, axis=1))) * self.episode_length
+            info["average_episode_rewards"] = role_reward_mean
+            info["role_num_agents"] = int(len(agent_ids))
+            train_infos[f"{role_name}_shared"] = info
+
+            # Step 2: 训练后仍需推进各agent buffer到下一episode起点。
+            for aid in agent_ids:
+                self.buffers[int(aid)].after_update()
         return train_infos
 
     def save(self):

@@ -9,6 +9,7 @@ exp:
   n_eval_rollout_threads: 10
   n_render_rollout_threads: 1
   num_env_steps: 1000000
+  role_buffer_mode: separate  # Choices: ["separate", "role_shared"]
 
 env:
   env_name: seen_hunter_only
