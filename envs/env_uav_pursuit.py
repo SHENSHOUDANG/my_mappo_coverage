@@ -13,6 +13,7 @@ Multi-UAV Pursuit 环境（Hunter-only版本）
 from typing import List, Optional
 import json
 import os
+from collections import deque
 
 import numpy as np
 import matplotlib
@@ -780,7 +781,7 @@ class TargetAgent(BaseAgent):
     ) -> np.ndarray:
         """
         功能:
-            escape策略：计算最大潜在可逃脱空间夹角，朝夹角中线方向运动，再叠加边界兜底修正。
+            escape策略：受Hunter与边界斥力场共同作用，沿最终合力方向运动。
         输入:
             hunters (Optional[List[HunterAgent]]): Hunter列表。
             active_hunter_mask (Optional[np.ndarray]): Hunter激活掩码。
@@ -793,17 +794,39 @@ class TargetAgent(BaseAgent):
         else:
             safe_mask = np.asarray(active_hunter_mask, dtype=bool)
 
-        gap_info = self.compute_max_escape_gap(safe_hunters, safe_mask)
-        is_valid = bool(gap_info.get("metric_valid", False)) and int(gap_info.get("active_alive_hunters", 0)) > 1
-        if (not is_valid) or float(gap_info.get("max_gap_angle", 0.0)) <= 1e-6:
-            return self._default_hold_action()
+        # Step 1: 计算Hunter斥力（与Hunter连线反向，距离越近权重越大）。
+        hunter_repulse = np.zeros(2, dtype=np.float32)
+        has_active_hunter = False
+        hunter_repulse_power = 2.0
+        for hid, hunter in enumerate(safe_hunters):
+            is_active = bool(safe_mask[hid]) if hid < len(safe_mask) else True
+            if (not is_active) or (not bool(hunter.alive)):
+                continue
+            has_active_hunter = True
+            rel = np.asarray(self.position, dtype=np.float32) - np.asarray(hunter.position, dtype=np.float32)
+            dist = float(np.linalg.norm(rel))
+            if dist <= 1e-6:
+                continue
+            dir_away = rel / dist
+            weight = 1.0 / max(dist ** hunter_repulse_power, 1e-6)
+            hunter_repulse += (float(weight) * dir_away).astype(np.float32)
 
-        encircling_hunter_ids = list(gap_info.get("encircling_hunter_ids", []))
-        if len(encircling_hunter_ids) <= 1:
-            return self._default_hold_action()
+        # Step 2: 计算边界斥力（离墙越近斥力越强）。
+        world_size = float(max(1e-6, self.world_size))
+        influence_dist = float(np.clip(self.boundary_influence_ratio, 0.01, 1.0) * world_size)
+        boundary_repulse, _ = self._build_wall_avoidance_vector(
+            ref_pos=np.asarray(self.position, dtype=np.float32),
+            influence_dist=influence_dist,
+        )
 
-        theta = float(gap_info.get("max_gap_center_angle", 0.0))
-        escape_dir = np.array([np.cos(theta), np.sin(theta)], dtype=np.float32)
+        # Step 3: 合力方向作为escape目标方向。
+        force = np.asarray(hunter_repulse, dtype=np.float32) + float(self.boundary_wall_gain) * np.asarray(
+            boundary_repulse, dtype=np.float32
+        )
+        force_norm = float(np.linalg.norm(force))
+        if (not has_active_hunter) or force_norm <= 1e-8:
+            return self._default_hold_action()
+        escape_dir = (force / force_norm).astype(np.float32)
         return self._action_with_boundary_avoidance(escape_dir)
 
     def _default_hold_action(self) -> np.ndarray:
@@ -1207,6 +1230,17 @@ class UAVPursuitEnv(object):
         self.base_reward_non_topk_scale = float(
             np.clip(float(reward_cfg.base_reward_non_topk_scale), 0.0, 1.0)
         )
+        self.base_reward_mode = str(getattr(reward_cfg, "base_reward_mode", "legacy")).lower()
+        if self.base_reward_mode not in ("legacy", "delta_window"):
+            raise ValueError(
+                "Unsupported reward.base_reward_mode: {} (choices: legacy, delta_window)".format(
+                    str(self.base_reward_mode)
+                )
+            )
+        self.base_delta_window = int(max(1, int(getattr(reward_cfg, "base_delta_window", 10))))
+        self.base_delta_hunter_scale = float(getattr(reward_cfg, "base_delta_hunter_scale", 1.0))
+        self.base_delta_target_scale = float(getattr(reward_cfg, "base_delta_target_scale", 1.0))
+        self.base_delta_norm_scale = float(max(1e-6, float(getattr(reward_cfg, "base_delta_norm_scale", self.capture_dis))))
         self.hunter_capture_reward = float(reward_cfg.hunter_capture_reward)
         self.target_captured_penalty = float(reward_cfg.target_captured_penalty)
         self.target_collision_penalty = float(reward_cfg.target_collision_penalty)
@@ -1240,6 +1274,7 @@ class UAVPursuitEnv(object):
 
         self.active_hunter_mask = np.ones(self.num_hunters, dtype=bool)
         self.active_num_hunters = self.num_hunters
+        self.hunter_distance_histories = [deque(maxlen=int(self.base_delta_window)) for _ in range(self.num_hunters)]
         self.task_seed = None
         self.regen_scope = "train"
         self.target_route_id = 0
@@ -1259,6 +1294,8 @@ class UAVPursuitEnv(object):
         self.reward_step_count = 0
         self.hunter_reward_last = 0.0
         self.target_reward_last = 0.0
+        for hid in range(self.num_hunters):
+            self.hunter_distance_histories[hid].clear()
         self.last_coord_summary_cache = np.zeros(
             (self.agent_num, self.coord_summary_feat_dim),
             dtype=np.float32,
@@ -2499,60 +2536,93 @@ class UAVPursuitEnv(object):
         hunter_d = []
         streak_used = []
 
-        # 1. Base Reward计算： 主要目的是要求Hunter尽可能接近Target的捕捉半径范围内
-        ## Hunter越接近Target(d <= capture_dis)，near_ratio越接近1, reward越大
-        ## Hunter越远离Target(d >  capture_dis), far_ratio越接近1（用world_size进行归一化）
-        ## Target的reward与Hunter完全相反
+        if self.base_reward_mode == "delta_window":
+            # Step 1.1: 新版base reward（每个hunter独立）
+            # 用“该hunter前N步到Target的平均距离”与“当前距离”做对比，
+            # 距离变小为正奖励，变大为负奖励；再按norm_scale归一化到[-1,1]。
+            delta_norm_values = []
+            norm_scale = max(float(self.base_delta_norm_scale), 1e-6)
+            for hid, hunter in enumerate(self.hunters):
+                if not bool(self.active_hunter_mask[hid]):
+                    continue
+                d_now = float(np.linalg.norm(hunter.position - self.target.position))
+                hunter_d.append(d_now)
+                hist = self.hunter_distance_histories[hid]
+                # 仅在未进入capture范围时计算delta-window base reward。
+                if d_now > capture_dis_safe:
+                    d_prev_avg = float(np.mean(hist)) if len(hist) > 0 else d_now
+                    delta_norm = float(np.clip((d_prev_avg - d_now) / norm_scale, -1.0, 1.0))
+                    hunter_base_reward[hid] = float(self.base_delta_hunter_scale) * delta_norm
+                    delta_norm_values.append(delta_norm)
+                else:
+                    hunter_base_reward[hid] = 0.0
+                hist.append(d_now)
 
-        # 2. streak reward: 要求hunter尽可能长期处于Target捕捉半径内
-        active_dist_pairs = []
-        for hid, hunter in enumerate(self.hunters):
-            if not bool(self.active_hunter_mask[hid]):
-                continue
-            d_val = float(np.linalg.norm(hunter.position - self.target.position))
-            active_dist_pairs.append((d_val, int(hid)))
-        active_dist_pairs.sort(key=lambda x: x[0])
-        if bool(self.base_reward_topk_enable):
-            topk = int(min(max(1, self.base_reward_topk_k), len(active_dist_pairs)))
-            topk_ids = {hid for _, hid in active_dist_pairs[:topk]}
-        else:
-            topk_ids = {hid for _, hid in active_dist_pairs}
+                streak_i = int(min(int(self.capture_counter[hid]), streak_cap))
+                streak_used.append(streak_i)
+                hunter_streak_reward[hid] = self.base_streak_scale * float(streak_i)
 
-        for i, h in enumerate(self.hunters):
-            if not bool(self.active_hunter_mask[i]):
-                continue
-            d = float(np.linalg.norm(h.position - self.target.position))
-            hunter_d.append(d)
-            is_topk_hunter = bool(int(i) in topk_ids)
-            base_scale = 1.0 if is_topk_hunter else float(self.base_reward_non_topk_scale)
+                if captured:
+                    capture_reward[hid] = self.hunter_capture_reward
 
-            if d <= capture_dis_safe:
-                near_ratio = 1.0 - d / capture_dis_safe
-                hunter_base_reward[i] = self.base_near_scale * near_ratio * base_scale
-            else:
-                far_ratio = (d - capture_dis_safe) / dist_scale
-                hunter_base_reward[i] = -self.base_far_scale * far_ratio * base_scale
-
-            streak_i = int(min(int(self.capture_counter[i]), streak_cap))
-            streak_used.append(streak_i)
-            hunter_streak_reward[i] = self.base_streak_scale * float(streak_i)
+            # Step 1.2: Target base reward取Hunter改变量的反向均值（归一化后）。
+            mean_delta_norm = float(np.mean(delta_norm_values)) if len(delta_norm_values) > 0 else 0.0
+            target_base_reward[self.target_index] = -float(self.base_delta_target_scale) * mean_delta_norm
+            avg_streak = float(np.mean(streak_used)) if streak_used else 0.0
+            target_streak_reward[self.target_index] = -self.base_streak_scale * avg_streak
 
             if captured:
-                capture_reward[i] = self.hunter_capture_reward
-
-        min_d = min(hunter_d) if hunter_d else (2.0 * self.world_size)
-        if min_d <= capture_dis_safe:
-            near_ratio_t = 1.0 - min_d / capture_dis_safe
-            target_base_reward[self.target_index] = -self.base_near_scale * near_ratio_t
+                capture_reward[self.target_index] = -self.target_captured_penalty
         else:
-            far_ratio_t = (min_d - capture_dis_safe) / dist_scale
-            target_base_reward[self.target_index] = self.base_far_scale * far_ratio_t
+            # Step 1.1: 旧版base reward（距离分段 + streak）
+            active_dist_pairs = []
+            for hid, hunter in enumerate(self.hunters):
+                if not bool(self.active_hunter_mask[hid]):
+                    continue
+                d_val = float(np.linalg.norm(hunter.position - self.target.position))
+                active_dist_pairs.append((d_val, int(hid)))
+            active_dist_pairs.sort(key=lambda x: x[0])
+            if bool(self.base_reward_topk_enable):
+                topk = int(min(max(1, self.base_reward_topk_k), len(active_dist_pairs)))
+                topk_ids = {hid for _, hid in active_dist_pairs[:topk]}
+            else:
+                topk_ids = {hid for _, hid in active_dist_pairs}
 
-        avg_streak = float(np.mean(streak_used)) if streak_used else 0.0
-        target_streak_reward[self.target_index] = -self.base_streak_scale * avg_streak
+            for i, h in enumerate(self.hunters):
+                if not bool(self.active_hunter_mask[i]):
+                    continue
+                d = float(np.linalg.norm(h.position - self.target.position))
+                hunter_d.append(d)
+                is_topk_hunter = bool(int(i) in topk_ids)
+                base_scale = 1.0 if is_topk_hunter else float(self.base_reward_non_topk_scale)
 
-        if captured:
-            capture_reward[self.target_index] = -self.target_captured_penalty
+                if d <= capture_dis_safe:
+                    near_ratio = 1.0 - d / capture_dis_safe
+                    hunter_base_reward[i] = self.base_near_scale * near_ratio * base_scale
+                else:
+                    far_ratio = (d - capture_dis_safe) / dist_scale
+                    hunter_base_reward[i] = -self.base_far_scale * far_ratio * base_scale
+
+                streak_i = int(min(int(self.capture_counter[i]), streak_cap))
+                streak_used.append(streak_i)
+                hunter_streak_reward[i] = self.base_streak_scale * float(streak_i)
+
+                if captured:
+                    capture_reward[i] = self.hunter_capture_reward
+
+            min_d = min(hunter_d) if hunter_d else (2.0 * self.world_size)
+            if min_d <= capture_dis_safe:
+                near_ratio_t = 1.0 - min_d / capture_dis_safe
+                target_base_reward[self.target_index] = -self.base_near_scale * near_ratio_t
+            else:
+                far_ratio_t = (min_d - capture_dis_safe) / dist_scale
+                target_base_reward[self.target_index] = self.base_far_scale * far_ratio_t
+
+            avg_streak = float(np.mean(streak_used)) if streak_used else 0.0
+            target_streak_reward[self.target_index] = -self.base_streak_scale * avg_streak
+
+            if captured:
+                capture_reward[self.target_index] = -self.target_captured_penalty
 
         # Step 2: escape_gap_reward（Hunter与Target方向激励相反）
         gap_hunter_reward_value, gap_target_reward_value, gap_hunter_ids, _ = self.target.compute_escape_gap_reward(

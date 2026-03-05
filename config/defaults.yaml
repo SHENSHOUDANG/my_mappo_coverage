@@ -78,6 +78,8 @@ reward:
   safe_zone_penalty_scale: 0.1
   
   # Base chase reward
+  base_reward_mode: legacy  # Choices: ["legacy", "delta_window"]
+  
   base_far_scale: 0.2
   base_near_scale: 1.0
   base_streak_scale: 0.1
@@ -85,6 +87,11 @@ reward:
   base_reward_topk_enable: false
   base_reward_topk_k: 2
   base_reward_non_topk_scale: 0.1
+  
+  base_delta_window: 10
+  base_delta_hunter_scale: 1.0
+  base_delta_target_scale: 1.0
+  base_delta_norm_scale: 20.0
 
   # Capture reward
   hunter_capture_reward: 15.0

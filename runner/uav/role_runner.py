@@ -126,12 +126,14 @@ class RoleBasedRunner(object):
             "reward": -np.inf,
             "capture_rate": -np.inf,
             "capture_steps": np.inf,
+            "max_escape_gap_angle": np.inf,
         }
         self.best_eval_metrics_by_bucket = {
             "target_learn": {
                 "eval_reward": -np.inf,
                 "capture_rate": -np.inf,
                 "capture_steps": np.inf,
+                "max_escape_gap_angle": np.inf,
             }
         }
         self.eval_hunter_bucket_metrics_cache = {}
@@ -1371,9 +1373,14 @@ class RoleBasedRunner(object):
         capture_steps = (
             float(np.mean(captured_steps)) if len(captured_steps) > 0 else float(self.eval_episode_length)
         )
-        valid_escape_counts = int(np.sum(env_escape_gap_angle_count))
-        if valid_escape_counts > 0:
-            max_escape_gap_angle = float(np.sum(env_escape_gap_angle_sum) / max(1, valid_escape_counts))
+        env_escape_gap_angle_mean = np.full(n_env, np.nan, dtype=np.float32)
+        valid_env_mask = env_escape_gap_angle_count > 0
+        env_escape_gap_angle_mean[valid_env_mask] = (
+            env_escape_gap_angle_sum[valid_env_mask] / np.maximum(1, env_escape_gap_angle_count[valid_env_mask])
+        )
+        captured_valid_mask = np.logical_and(env_captured, np.isfinite(env_escape_gap_angle_mean))
+        if bool(np.any(captured_valid_mask)):
+            max_escape_gap_angle = float(np.mean(env_escape_gap_angle_mean[captured_valid_mask]))
         else:
             max_escape_gap_angle = float("nan")
 
@@ -1392,6 +1399,7 @@ class RoleBasedRunner(object):
             env_capture_step=env_capture_step,
             env_alive_rate=env_alive_rate,
             env_active_hunter_count=env_active_hunter_count,
+            env_escape_gap_angle_mean=env_escape_gap_angle_mean,
         )
 
         self._print_metric_table(
@@ -1462,7 +1470,7 @@ class RoleBasedRunner(object):
                     capture_rate=float(grouped_metrics["capture_rate"]),
                     capture_steps=float(grouped_metrics["capture_steps"]),
                     alive_rate=float(grouped_metrics["alive_rate"]),
-                    max_escape_gap_angle=float("nan"),
+                    max_escape_gap_angle=float(grouped_metrics["max_escape_gap_angle"]),
                     captured_episodes=int(grouped_metrics["captured_episodes"]),
                     total_eval_episodes=int(grouped_metrics["total_eval_episodes"]),
                 )
@@ -1860,6 +1868,7 @@ class RoleBasedRunner(object):
         env_capture_step,
         env_alive_rate,
         env_active_hunter_count,
+        env_escape_gap_angle_mean,
     ):
         """
         功能:
@@ -1870,6 +1879,7 @@ class RoleBasedRunner(object):
             env_capture_step (np.ndarray): shape=(n_env,) 每环境捕获步数，未捕获为-1。
             env_alive_rate (np.ndarray): shape=(n_env,) 每环境终止alive_rate。
             env_active_hunter_count (np.ndarray): shape=(n_env,) 每环境激活hunter数量。
+            env_escape_gap_angle_mean (np.ndarray): shape=(n_env,) 每环境最大潜在可逃脱空间角度均值（NaN表示无效）。
         输出:
             dict[int, dict]: 按hunter数量索引的指标字典。
         """
@@ -1879,6 +1889,7 @@ class RoleBasedRunner(object):
         capture_steps = np.asarray(env_capture_step, dtype=np.int32).reshape(-1)
         alive_rates = np.asarray(env_alive_rate, dtype=np.float32).reshape(-1)
         hunter_counts = np.asarray(env_active_hunter_count, dtype=np.int32).reshape(-1)
+        escape_gap_means = np.asarray(env_escape_gap_angle_mean, dtype=np.float32).reshape(-1)
         out = {}
 
         # Step 2: 逐hunter数量聚合reward/capture_rate/capture_steps。
@@ -1898,11 +1909,20 @@ class RoleBasedRunner(object):
                 if len(grouped_capture_steps) > 0
                 else float(self.eval_episode_length)
             )
+            grouped_escape_angles = escape_gap_means[
+                np.logical_and(mask, np.logical_and(captured_flags, np.isfinite(escape_gap_means)))
+            ]
+            grouped_escape_angle_mean = (
+                float(np.mean(grouped_escape_angles))
+                if grouped_escape_angles.size > 0
+                else float("nan")
+            )
             out[int(hunter_count)] = {
                 "eval_reward": float(np.mean(rewards[mask])) if total_eval_episodes > 0 else 0.0,
                 "capture_rate": float(captured_episodes / max(1, total_eval_episodes)),
                 "capture_steps": float(mean_capture_steps),
                 "alive_rate": float(np.mean(alive_rates[mask])) if total_eval_episodes > 0 else 0.0,
+                "max_escape_gap_angle": float(grouped_escape_angle_mean),
                 "captured_episodes": int(captured_episodes),
                 "total_eval_episodes": int(total_eval_episodes),
             }
@@ -2113,6 +2133,9 @@ class RoleBasedRunner(object):
             updated_metrics.append("capture_rate")
         if float(eval_metrics["capture_steps"]) < float(self.best_eval_metrics["capture_steps"]):
             updated_metrics.append("capture_steps")
+        cur_gap = float(eval_metrics.get("max_escape_gap_angle", float("nan")))
+        if np.isfinite(cur_gap) and cur_gap < float(self.best_eval_metrics["max_escape_gap_angle"]):
+            updated_metrics.append("max_escape_gap_angle")
         return updated_metrics
 
     def _peek_bucket_metric_updates(self, bucket, eval_metrics):
@@ -2130,6 +2153,7 @@ class RoleBasedRunner(object):
                 "eval_reward": -np.inf,
                 "capture_rate": -np.inf,
                 "capture_steps": np.inf,
+                "max_escape_gap_angle": np.inf,
             }
         best = self.best_eval_metrics_by_bucket[bucket]
         updated_metrics = []
@@ -2139,6 +2163,9 @@ class RoleBasedRunner(object):
             updated_metrics.append("capture_rate")
         if float(eval_metrics["capture_steps"]) < float(best["capture_steps"]):
             updated_metrics.append("capture_steps")
+        cur_gap = float(eval_metrics.get("max_escape_gap_angle", float("nan")))
+        if np.isfinite(cur_gap) and cur_gap < float(best["max_escape_gap_angle"]):
+            updated_metrics.append("max_escape_gap_angle")
         return updated_metrics
 
     def _update_bucket_best_metrics(self, bucket, eval_metrics):
@@ -2156,6 +2183,7 @@ class RoleBasedRunner(object):
                 "eval_reward": -np.inf,
                 "capture_rate": -np.inf,
                 "capture_steps": np.inf,
+                "max_escape_gap_angle": np.inf,
             }
         best = self.best_eval_metrics_by_bucket[bucket]
         updated_metrics = self._peek_bucket_metric_updates(bucket, eval_metrics)
@@ -2165,15 +2193,27 @@ class RoleBasedRunner(object):
             best["capture_rate"] = float(eval_metrics["capture_rate"])
         if "capture_steps" in updated_metrics:
             best["capture_steps"] = float(eval_metrics["capture_steps"])
+        if "max_escape_gap_angle" in updated_metrics:
+            best["max_escape_gap_angle"] = float(eval_metrics["max_escape_gap_angle"])
         self._print_metric_table(
             "EvalSummary[{}]".format(str(bucket)),
             {
                 "cur_reward": "{:.4f}".format(float(eval_metrics["eval_reward"])),
                 "cur_capture_rate": "{:.4f}".format(float(eval_metrics["capture_rate"])),
                 "cur_capture_steps": "{:.2f}".format(float(eval_metrics["capture_steps"])),
+                "cur_max_escape_gap": (
+                    "{:.4f}".format(float(eval_metrics["max_escape_gap_angle"]))
+                    if np.isfinite(float(eval_metrics.get("max_escape_gap_angle", float("nan"))))
+                    else "NA"
+                ),
                 "best_reward": "{:.4f}".format(float(best["eval_reward"])),
                 "best_capture_rate": "{:.4f}".format(float(best["capture_rate"])),
                 "best_capture_steps": "{:.2f}".format(float(best["capture_steps"])),
+                "best_max_escape_gap": (
+                    "{:.4f}".format(float(best["max_escape_gap_angle"]))
+                    if np.isfinite(float(best.get("max_escape_gap_angle", float("nan"))))
+                    else "NA"
+                ),
                 "updated": ",".join(updated_metrics) if len(updated_metrics) > 0 else "none",
             },
         )
@@ -2182,7 +2222,7 @@ class RoleBasedRunner(object):
     def _maybe_save_best_models(self, episode, eval_metrics):
         """
         功能:
-            按reward/capture_rate/capture_steps三个维度保存最佳模型。
+            按reward/capture_rate/capture_steps/max_escape_gap_angle四个维度保存最佳模型。
         输入:
             episode (int): 当前训练episode编号。
             eval_metrics (dict): 当前评估指标字典。
@@ -2208,6 +2248,13 @@ class RoleBasedRunner(object):
             self._save_best_snapshot("capture_steps", episode, eval_metrics)
             updated_metrics.append("capture_steps")
 
+        # Step 4: max_escape_gap_angle越小越好（仅在指标有效时参与刷新）
+        cur_gap = float(eval_metrics.get("max_escape_gap_angle", float("nan")))
+        if np.isfinite(cur_gap) and cur_gap < float(self.best_eval_metrics["max_escape_gap_angle"]):
+            self.best_eval_metrics["max_escape_gap_angle"] = float(cur_gap)
+            self._save_best_snapshot("max_escape_gap_angle", episode, eval_metrics)
+            updated_metrics.append("max_escape_gap_angle")
+
         self._print_metric_table(
             "EvalSummary[fixed]",
             {
@@ -2215,9 +2262,19 @@ class RoleBasedRunner(object):
                 "cur_reward": "{:.4f}".format(float(eval_metrics["eval_reward"])),
                 "cur_capture_rate": "{:.4f}".format(float(eval_metrics["capture_rate"])),
                 "cur_capture_steps": "{:.2f}".format(float(eval_metrics["capture_steps"])),
+                "cur_max_escape_gap": (
+                    "{:.4f}".format(float(eval_metrics["max_escape_gap_angle"]))
+                    if np.isfinite(float(eval_metrics.get("max_escape_gap_angle", float("nan"))))
+                    else "NA"
+                ),
                 "best_reward": "{:.4f}".format(float(self.best_eval_metrics["reward"])),
                 "best_capture_rate": "{:.4f}".format(float(self.best_eval_metrics["capture_rate"])),
                 "best_capture_steps": "{:.2f}".format(float(self.best_eval_metrics["capture_steps"])),
+                "best_max_escape_gap": (
+                    "{:.4f}".format(float(self.best_eval_metrics["max_escape_gap_angle"]))
+                    if np.isfinite(float(self.best_eval_metrics.get("max_escape_gap_angle", float("nan"))))
+                    else "NA"
+                ),
                 "updated": ",".join(updated_metrics) if len(updated_metrics) > 0 else "none",
             },
         )
@@ -2228,7 +2285,7 @@ class RoleBasedRunner(object):
         功能:
             保存某个最优指标对应的角色模型与指标文本。
         输入:
-            metric_name (str): 指标名称（reward/capture_rate/capture_steps）。
+            metric_name (str): 指标名称（reward/capture_rate/capture_steps/max_escape_gap_angle）。
             episode (int): 当前训练episode编号。
             eval_metrics (dict): 当前评估指标。
         输出:
@@ -2259,18 +2316,21 @@ class RoleBasedRunner(object):
             f.write(f"eval_reward={float(eval_metrics['eval_reward']):.6f}\n")
             f.write(f"capture_rate={float(eval_metrics['capture_rate']):.6f}\n")
             f.write(f"capture_steps={float(eval_metrics['capture_steps']):.6f}\n")
+            f.write(f"max_escape_gap_angle={float(eval_metrics.get('max_escape_gap_angle', float('nan'))):.6f}\n")
             f.write(f"captured_episodes={int(eval_metrics.get('captured_episodes', 0))}\n")
             f.write(f"total_eval_episodes={int(eval_metrics.get('total_eval_episodes', 0))}\n")
             f.write(f"best_reward={float(self.best_eval_metrics['reward']):.6f}\n")
             f.write(f"best_capture_rate={float(self.best_eval_metrics['capture_rate']):.6f}\n")
             f.write(f"best_capture_steps={float(self.best_eval_metrics['capture_steps']):.6f}\n")
+            f.write(f"best_max_escape_gap_angle={float(self.best_eval_metrics.get('max_escape_gap_angle', float('nan'))):.6f}\n")
         print(
-            "[Best] metric={} updated at episode {} | reward={:.4f} | capture_rate={:.4f} | capture_steps={:.2f} | path={}".format(
+            "[Best] metric={} updated at episode {} | reward={:.4f} | capture_rate={:.4f} | capture_steps={:.2f} | max_escape_gap={:.4f} | path={}".format(
                 str(metric_name),
                 int(episode),
                 float(eval_metrics["eval_reward"]),
                 float(eval_metrics["capture_rate"]),
                 float(eval_metrics["capture_steps"]),
+                float(eval_metrics.get("max_escape_gap_angle", float("nan"))),
                 str(metric_dir),
             )
         )
