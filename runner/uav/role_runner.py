@@ -16,6 +16,7 @@ import argparse
 import csv
 import shutil
 import copy
+import json
 
 import numpy as np
 import torch
@@ -1246,8 +1247,8 @@ class RoleBasedRunner(object):
         env_capture_step = np.full(n_env, -1, dtype=np.int32)
         env_alive_rate = np.full(n_env, 0.0, dtype=np.float32)
         env_active_hunter_count = np.full(n_env, int(eval_num_hunters), dtype=np.int32)
-        env_escape_gap_angle_sum = np.zeros(n_env, dtype=np.float32)
-        env_escape_gap_angle_count = np.zeros(n_env, dtype=np.int32)
+        # 每个环境仅记录“首次成功捕捉时刻”的escape_gap_angle。
+        env_capture_escape_gap_angle = np.full(n_env, np.nan, dtype=np.float32)
         env_finished = np.zeros(n_env, dtype=bool)
         eval_frames = [[] for _ in range(n_env)]
         gif_env_ids = list(range(n_env))
@@ -1287,6 +1288,8 @@ class RoleBasedRunner(object):
             eval_obs, eval_rewards, eval_dones, eval_infos = eval_envs.step(eval_actions_env)
 
             for env_i in range(n_env):
+                metric_valid = False
+                metric_angle = float("nan")
                 if eval_infos[env_i] is not None and len(eval_infos[env_i]) > 0:
                     env_active_hunter_count[env_i] = int(
                         self._extract_active_hunter_count(
@@ -1301,12 +1304,10 @@ class RoleBasedRunner(object):
                     )
                     metric_valid = bool(metric_info.get("max_escape_gap_metric_valid", False))
                     metric_angle = float(metric_info.get("max_escape_gap_angle", float("nan")))
-                    if metric_valid and np.isfinite(metric_angle):
-                        env_escape_gap_angle_sum[env_i] += float(metric_angle)
-                        env_escape_gap_angle_count[env_i] += 1
                     
                 if env_finished[env_i]:
                     continue
+
                 env_episode_rewards[env_i] += float(
                     np.sum(eval_rewards[env_i, : eval_num_hunters, 0])
                     / max(1, eval_num_hunters)
@@ -1316,6 +1317,10 @@ class RoleBasedRunner(object):
                 ):
                     env_captured[env_i] = True
                     env_capture_step[env_i] = int(eval_step + 1)
+                    # 仅记录“成功捕捉当下”的escape_gap_angle。
+                    if metric_valid and np.isfinite(metric_angle):
+                        env_capture_escape_gap_angle[env_i] = float(metric_angle)
+                        
                 if bool(np.all(eval_dones[env_i])):
                     env_alive_rate[env_i] = float(
                         self._compute_hunter_alive_rate(
@@ -1373,14 +1378,9 @@ class RoleBasedRunner(object):
         capture_steps = (
             float(np.mean(captured_steps)) if len(captured_steps) > 0 else float(self.eval_episode_length)
         )
-        env_escape_gap_angle_mean = np.full(n_env, np.nan, dtype=np.float32)
-        valid_env_mask = env_escape_gap_angle_count > 0
-        env_escape_gap_angle_mean[valid_env_mask] = (
-            env_escape_gap_angle_sum[valid_env_mask] / np.maximum(1, env_escape_gap_angle_count[valid_env_mask])
-        )
-        captured_valid_mask = np.logical_and(env_captured, np.isfinite(env_escape_gap_angle_mean))
+        captured_valid_mask = np.logical_and(env_captured, np.isfinite(env_capture_escape_gap_angle))
         if bool(np.any(captured_valid_mask)):
-            max_escape_gap_angle = float(np.mean(env_escape_gap_angle_mean[captured_valid_mask]))
+            max_escape_gap_angle = float(np.mean(env_capture_escape_gap_angle[captured_valid_mask]))
         else:
             max_escape_gap_angle = float("nan")
 
@@ -1399,7 +1399,7 @@ class RoleBasedRunner(object):
             env_capture_step=env_capture_step,
             env_alive_rate=env_alive_rate,
             env_active_hunter_count=env_active_hunter_count,
-            env_escape_gap_angle_mean=env_escape_gap_angle_mean,
+            env_escape_gap_angle_mean=env_capture_escape_gap_angle,
         )
 
         self._print_metric_table(
@@ -1973,19 +1973,31 @@ class RoleBasedRunner(object):
 
         # Step 2: 基于当前可用桶（fixed/learn）绘制并覆盖保存同名图。
         bucket_to_metrics = self.eval_hunter_bucket_metrics_cache[cache_key]
-        metrics_order = ["eval_reward", "capture_rate", "capture_steps", "alive_rate"]
+        metrics_order = [
+            "eval_reward",
+            "capture_rate",
+            "capture_steps",
+            "alive_rate",
+            "max_escape_gap_angle",
+        ]
         metric_titles = {
             "eval_reward": "Eval Reward",
             "capture_rate": "Capture Rate",
             "capture_steps": "Capture Steps",
             "alive_rate": "Alive Rate",
+            "max_escape_gap_angle": "Max Potential Escape Gap Angle",
         }
         bucket_style = {
             "fixed": {"label": "fixed", "color": "#1f77b4", "marker": "o"},
             "learn": {"label": "learn", "color": "#ff7f0e", "marker": "s"},
         }
 
-        fig, axes = plt.subplots(4, 1, figsize=(7.5, 14.0), dpi=120)
+        fig, axes = plt.subplots(len(metrics_order), 1, figsize=(7.5, 17.0), dpi=120)
+        plot_export = {
+            "episode": int(episode),
+            "total_num_steps": int(total_num_steps),
+            "buckets": {},
+        }
         for idx, metric_name in enumerate(metrics_order):
             ax = axes[idx]
             x_ticks = set()
@@ -1996,7 +2008,12 @@ class RoleBasedRunner(object):
                 if grouped is None or len(grouped) == 0:
                     continue
                 x_vals = sorted([int(k) for k in grouped.keys()])
-                y_vals = [float(grouped[int(hc)][metric_name]) for hc in x_vals]
+                y_vals = []
+                for hc in x_vals:
+                    metric_val = float(grouped[int(hc)].get(metric_name, float("nan")))
+                    if metric_name == "max_escape_gap_angle" and (not np.isfinite(metric_val)):
+                        metric_val = 360.0
+                    y_vals.append(float(metric_val))
                 x_ticks.update(x_vals)
                 style = bucket_style[bucket_name]
                 ax.plot(
@@ -2031,6 +2048,12 @@ class RoleBasedRunner(object):
                         color=style["color"],
                         fontsize=8,
                     )
+                if bucket_name not in plot_export["buckets"]:
+                    plot_export["buckets"][bucket_name] = {}
+                plot_export["buckets"][bucket_name][metric_name] = {
+                    "x": [int(x) for x in x_vals],
+                    "y": [float(y) for y in y_vals],
+                }
             ax.set_title(metric_titles[metric_name])
             ax.set_xlabel("Number of Hunters")
             if len(x_ticks) > 0:
@@ -2038,6 +2061,8 @@ class RoleBasedRunner(object):
             ax.grid(True, linestyle="--", linewidth=0.4, alpha=0.4)
             if metric_name in ("capture_rate", "alive_rate"):
                 ax.set_ylim(0.0, 1.0)
+            if metric_name == "max_escape_gap_angle":
+                ax.set_ylim(0.0, 360.0)
             ax.set_ylabel("Value")
             handles, labels = ax.get_legend_handles_labels()
             if len(handles) > 0:
@@ -2050,6 +2075,11 @@ class RoleBasedRunner(object):
         out_path = out_dir / f"eval_hunter_bucket_metrics_ep_{int(episode)}.png"
         fig.savefig(str(out_path))
         plt.close(fig)
+
+        # Step 3: 导出可复绘数据，便于后续跨模型分桶对比脚本直接读取。
+        json_path = out_dir / f"eval_hunter_bucket_metrics_ep_{int(episode)}.json"
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(plot_export, f, ensure_ascii=False, indent=2)
 
     def _format_duration(self, seconds):
         """
@@ -2309,6 +2339,9 @@ class RoleBasedRunner(object):
         for gif_path in eval_gif_paths:
             shutil.copy2(str(gif_path), str(metric_dir / gif_path.name))
 
+        # Step 3.1: 复制评估分桶图与对应可复绘数据到最优目录。
+        self._copy_eval_hunter_bucket_artifacts(episode=episode, dst_dir=metric_dir)
+
         # Step 4: 写入最优指标文本
         with open(metric_dir / "best_info.txt", "w", encoding="utf-8") as f:
             f.write(f"metric={metric_name}\n")
@@ -2334,6 +2367,39 @@ class RoleBasedRunner(object):
                 str(metric_dir),
             )
         )
+
+    def _copy_eval_hunter_bucket_artifacts(self, episode, dst_dir):
+        """
+        功能:
+            将指定episode的hunter分桶指标图及其可复绘JSON数据复制到目标目录。
+        输入:
+            episode (int): 评估episode编号。
+            dst_dir (str | Path): 目标目录。
+        输出:
+            无。
+        """
+        # Step 1: 准备路径与通配模式。
+        dst = Path(dst_dir)
+        dst.mkdir(parents=True, exist_ok=True)
+        png_name = f"eval_hunter_bucket_metrics_ep_{int(episode)}.png"
+        json_name = f"eval_hunter_bucket_metrics_ep_{int(episode)}.json"
+        png_src = Path(self.gif_dir) / png_name
+        json_src = Path(self.gif_dir) / json_name
+
+        # Step 2: 优先复制同episode文件；不存在时回退到最新同前缀文件。
+        if png_src.exists():
+            shutil.copy2(str(png_src), str(dst / png_name))
+        else:
+            png_candidates = sorted(Path(self.gif_dir).glob("eval_hunter_bucket_metrics_ep_*.png"))
+            if len(png_candidates) > 0:
+                shutil.copy2(str(png_candidates[-1]), str(dst / png_candidates[-1].name))
+
+        if json_src.exists():
+            shutil.copy2(str(json_src), str(dst / json_name))
+        else:
+            json_candidates = sorted(Path(self.gif_dir).glob("eval_hunter_bucket_metrics_ep_*.json"))
+            if len(json_candidates) > 0:
+                shutil.copy2(str(json_candidates[-1]), str(dst / json_candidates[-1].name))
 
     def _load_models_from_dir(self, model_dir):
         """

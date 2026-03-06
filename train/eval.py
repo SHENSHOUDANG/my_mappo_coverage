@@ -81,8 +81,18 @@ def main(args):
     输出:
         无。
     """
-    # Step 1: 加载配置并准备设备
-    merged_cfg = load_config(args.config_file)
+    # Step 1: 校验run_dir
+    run_dir = Path(str(args.run_dir))
+    if not run_dir.exists():
+        raise FileNotFoundError(f"run_dir not found: {run_dir}")
+    print(f"[EvalOnly] run_dir={run_dir}")
+
+    # Step 2: 加载配置并准备设备
+    if args.config_file:
+        merged_cfg = load_config(args.config_file)
+    else:
+        merged_cfg = load_config(Path(args.run_dir) / "train_cfg.yaml")
+
     use_cuda = (bool(args.cuda) or bool(merged_cfg.exp.cuda)) and torch.cuda.is_available()
     if use_cuda:
         print("choose to use gpu...")
@@ -95,11 +105,7 @@ def main(args):
         device = torch.device("cpu")
         torch.set_num_threads(int(merged_cfg.exp.n_training_threads))
 
-    # Step 2: 校验run_dir
-    run_dir = Path(str(args.run_dir))
-    if not run_dir.exists():
-        raise FileNotFoundError(f"run_dir not found: {run_dir}")
-    print(f"[EvalOnly] run_dir={run_dir}")
+    
 
     # Step 3: 固定随机种子，构建训练/评估环境
     torch.manual_seed(int(merged_cfg.exp.seed))
@@ -184,7 +190,7 @@ if __name__ == "__main__":
         description="Standalone evaluation for saved model dirs",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--config_file", type=str, required=True, help="Path to YAML config file")
+    parser.add_argument("--config_file", type=str, help="Path to YAML config file")
     parser.add_argument("--run_dir", type=str, required=True, help="Path to one experiment run directory")
     parser.add_argument("--cuda", action="store_true", help="Use GPU if available")
     parser.add_argument("--total_num_steps", type=int, default=None, help="Override total_num_steps for eval logging")

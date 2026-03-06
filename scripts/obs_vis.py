@@ -425,13 +425,21 @@ class ObsVisApp:
                 for key in info.keys():
                     if str(key).startswith("reward_"):
                         term_keys.add(str(key))
+
         term_keys.add("reward_total")
         for key in sorted(term_keys):
             vals = np.zeros(n_agent, dtype=np.float32)
+
             for i, info in enumerate(infos):
                 if isinstance(info, dict):
                     vals[i] = float(info.get(key, 0.0))
+
             self.reward_term_history.setdefault(key, []).append(vals)
+        
+        # print('-' * 20)
+        # for i, info in enumerate(infos):
+        #     print(info["reward_escape_gap"] , end=' | ')
+        # print('', end='\n')
 
     def step_once(self) -> None:
         if self.env_wrapper is None or self.core_env is None:

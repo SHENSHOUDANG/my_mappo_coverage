@@ -105,6 +105,12 @@ reward:
   escape_gap_enable: true
   escape_gap_hunter_reward_scale: 0.2
   escape_gap_target_reward_scale: 0.2
+  # 新版拆分项：包围质量reward（基于encircle_score / gap_open_score）
+  escape_gap_encircle_hunter_reward_scale: 0.2
+  escape_gap_encircle_target_reward_scale: 0.2
+  # 新版拆分项：拦截reward（基于direction_score，速度低于阈值不计算）
+  escape_gap_intercept_hunter_reward_scale: 0.2
+  escape_gap_intercept_target_reward_scale: 0.2
   escape_radius: 35.0
   escape_block_scale: 0.7
   escape_gap_angle_bins: 360
