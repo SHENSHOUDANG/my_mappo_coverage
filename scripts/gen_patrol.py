@@ -65,8 +65,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def clamp01(value: float) -> float:
-    return max(0.0, min(1.0, value))
+def clamp01(value: float, min_v=0.05, max_v=0.95) -> float:
+    return max(min_v, min(max_v, value))
 
 
 def generate_route(rng: random.Random, n_points: int) -> list[list[float]]:

@@ -1,6 +1,6 @@
 exp:
   algorithm_name: rmappo
-  experiment_name: sBuf_lrnPolicy_v3v1_esc20_blk3_deltaBase5
+  experiment_name: Evaln320_sBuf_rndPolicy_v3v1_esc20_blk3_deltaBase5
   seed: 1
   num_env_steps: 2000000 # total environment steps to train
   role_buffer_mode: role_shared  # Choices: ["separate", "role_shared"]
@@ -17,7 +17,7 @@ env:
   coord_summary_obs_enable: false
   coord_topk_hunters: 4
 
-  target_policy_source: learn # Choices: ["learn", "patrol", "random", "greedy", "escape"]
+  target_policy_source: patrol # Choices: ["learn", "patrol", "random", "greedy", "escape"]
   target_switch_interval: 10
 
 Hunter:
@@ -53,7 +53,7 @@ reward:
   base_delta_norm_scale: 20.0
 
   # Escape Gap
-  escape_gap_enable: false
+  escape_gap_enable: true
   escape_gap_hunter_reward_scale: 20.0
   escape_gap_target_reward_scale: 5.0
   # 新版拆分项：包围质量reward（基于encircle_score / gap_open_score）
@@ -95,11 +95,11 @@ logging:
 
 eval:
   eval_episode_length: 600
-  fixed_tasks_file: config/eval_tasks/patrol_tasks_h8_p3_n100.yaml
+  fixed_tasks_file: config/eval_tasks/patrol_tasks_h8_p3_n320.yaml
 
 domain_randomization:
   train_split:
-    enable: false
+    enable: true
     regen_interval_episode: 20
     regen_prob: 1.0
     hunter_count_choices: [1, 2, 3]

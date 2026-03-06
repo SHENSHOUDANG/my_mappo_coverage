@@ -1297,11 +1297,8 @@ class RoleBasedRunner(object):
                             max_hunters_num=eval_num_hunters,
                         )
                     )
-                    metric_info = (
-                        eval_infos[env_i][eval_target_index]
-                        if eval_target_index < len(eval_infos[env_i])
-                        else eval_infos[env_i][0]
-                    )
+                    metric_info = eval_infos[env_i][eval_target_index]
+                        
                     metric_valid = bool(metric_info.get("max_escape_gap_metric_valid", False))
                     metric_angle = float(metric_info.get("max_escape_gap_angle", float("nan")))
                     

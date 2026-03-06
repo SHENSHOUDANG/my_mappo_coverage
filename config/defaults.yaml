@@ -36,7 +36,7 @@ env:
   noisy_target_vel_std: 10
 
   target_policy_source: learn
-  target_patrol_path: datasets/patrol_routes.json
+  target_patrol_path: datasets/train_patrol_routes.json
   target_patrol_names: ["square", "ring"]
   target_switch_interval: 10
   target_boundary_avoid_enable: true
@@ -50,25 +50,25 @@ env:
 
 Hunter:
   perception_radius: -1
-  max_velo: 20
+  max_velo: 8
   safe_dis: 15
   control_mode: acceleration  # Choices: ["acceleration", "velocity"]
-  max_acc: 5
-  max_turn_angle: 10
+  max_acc: 2
+  max_turn_angle: 5
   min_turn_limit_velo: 2.0
 
 Explorer:
   perception_radius: -1
-  max_velo: 20
+  max_velo: 8
   safe_dis: 15
 
 Target: 
   perception_radius: -1
-  max_velo: 20
+  max_velo: 8
   safe_dis: 15
   control_mode: acceleration
-  max_acc: 5
-  max_turn_angle: 30
+  max_acc: 2
+  max_turn_angle: 15
   min_turn_limit_velo: 3.0
 
 reward:
