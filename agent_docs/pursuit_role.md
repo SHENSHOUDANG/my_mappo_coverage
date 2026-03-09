@@ -12,7 +12,7 @@
 
 ## 2. Agent 与控制
 - Hunter: `policy_type=learn`，动作来自 MAPPO/RMAPPO。
-- Target: `policy_type` 支持 `learn` / `random` / `patrol`。
+- Target: `policy_type` 支持 `learn` / `random` / `patrol` / `greedy` / `escape`（训练配置常用前3种）。
 - 控制模式：
   - `velocity`: 动作为目标速度方向/幅值（归一化到 `[-1,1]`），映射到最大速度。
   - `acceleration`: 动作为归一化加速度，积分更新速度。
@@ -61,7 +61,7 @@
 
 ### 5.2 碰撞
 - 边界风险：所有 active agent 都计算到最近边界距离，并施加安全区惩罚。
-- 硬边界碰撞：到边界距离 `<= collision_dis` 时该 agent 失活。
+- 硬边界碰撞：到边界距离 `<= collision_dis` 时，Hunter 失活；Target 在 `policy_type!=learn` 时失活，在 `policy_type=learn` 时执行反弹并保持存活。
 - 两两碰撞：仅在非 target agent 间判定（当前即 hunter-hunter）。
 - Target 不参与两两碰撞判定，但会参与边界碰撞判定。
 - Target 发生边界碰撞时追加 `target_collision_penalty`。
@@ -70,7 +70,7 @@
 满足任一条件终止：
 - 达到 `episode_length`。
 - 成功捕获 target。
-- target 边界碰撞。
+- target 边界碰撞（仅 `policy_type!=learn` 时）。
 - 全部 active hunter 死亡。
 
 ## 6. 奖励实现
@@ -88,9 +88,13 @@
 - Hunter 距离目标越近，基础奖励越大；超出捕获半径时给负向远距惩罚。
 - Target 使用与 Hunter 镜像的基础奖励。
 - Hunter 连续处于捕获半径内可获得 streak 奖励（有上限 `base_streak_cap`）。
-- 捕获瞬间 Hunter 得到 `hunter_capture_reward`，Target 受到 `target_captured_penalty`。
+- 捕获瞬间的 `capture_reward` 由 `reward.capture_reward_allocation` 控制，Target 均受到 `target_captured_penalty`。
+  - `team`：所有 active 且 alive Hunter 都得到 `hunter_capture_reward`。
+  - `alone`：仅满足 `capture_counter>=capture_step` 的成功捕获 Hunter 得到 `hunter_capture_reward`。
+  - `encircle`：成功捕获 Hunter 得到 `hunter_capture_reward`；其他参与围捕的 Hunter 按加权系数得到奖励，且与包围质量正相关。
 - 碰撞惩罚包含安全区线性惩罚与硬碰撞惩罚，并受 `collision_penalty_cap` 截断。
 - 所有 agent 有归一化速度惩罚：`-speed_penalty * (||v|| / max_speed)`。
+- `encircle` 模式下，围捕质量由角分布最大缺口推导（缺口越小质量越高），非成功捕获者按与Target距离的反比权重分享质量缩放后的奖励池。
 
 ### 6.1 围捕几何奖励（escape-gap）
 - 在 Target 周围 `escape_radius` 内筛选围捕 Hunter；
@@ -126,7 +130,7 @@
 - 初始捕获保护：若 Target 初始 `capture_dis` 内存在 active Hunter，则重采样（最多10次）。
 - `hunters_in_zone=true` 时：
   - 先按 `m=ceil(sqrt(max_hunters_num))` 生成 `m*m` 方阵槽位；
-  - 槽位间距采用 `hunter_zone_spacing = max(collision_dis*3, Hunter.safe_dis)`；
+  - 槽位间距采用 `hunter_zone_spacing = max(collision_dis*3, Hunter.safe_dis*1.2)`；
   - 阵列中心每次 reset 在地图内随机采样（非固定地图中心）；
   - 每次 reset 都随机重排 Hunter 与槽位映射。
 - `target_avoid_hunter_zone=true` 时：
@@ -161,7 +165,7 @@
 
 主要文件：
 - `models/actor_*.pt`, `models/critic_*.pt`
-- `models/best_eval_reward|capture_rate|capture_steps/`
+- `models/best_eval_reward|capture_rate|capture_steps|max_escape_gap_angle/`
 - `logs/`（TensorBoard）与 `logs/summary.json`
 - `gifs/`（训练/评估 GIF）
 - `log.csv`, `eval.csv`, `time_stat.csv(可选)`

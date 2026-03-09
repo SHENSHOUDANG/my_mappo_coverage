@@ -1281,6 +1281,18 @@ class UAVPursuitEnv(object):
         self.base_delta_norm_scale = float(max(1e-6, float(getattr(reward_cfg, "base_delta_norm_scale", self.capture_dis))))
         self.hunter_capture_reward = float(reward_cfg.hunter_capture_reward)
         self.target_captured_penalty = float(reward_cfg.target_captured_penalty)
+        capture_reward_allocation = str(
+            getattr(reward_cfg, "capture_reward_allocation", "team")
+        ).lower()
+        if capture_reward_allocation == "naive":
+            capture_reward_allocation = "team"
+        if capture_reward_allocation not in ("team", "alone", "encircle"):
+            raise ValueError(
+                "Unsupported reward.capture_reward_allocation: {} (choices: team, alone, encircle)".format(
+                    str(capture_reward_allocation)
+                )
+            )
+        self.capture_reward_allocation = str(capture_reward_allocation)
         self.target_collision_penalty = float(reward_cfg.target_collision_penalty)
         escape_block_scale = float(max(0.0, reward_cfg.escape_block_scale))
         escape_block_length = float(max(0.0, self.capture_dis * escape_block_scale))
@@ -2587,6 +2599,136 @@ class UAVPursuitEnv(object):
         self.last_boundary_collision_agents = boundary_collision_agents
         return target_collided, collision_rewards
 
+    def _get_capture_success_hunter_ids(self):
+        """
+        功能:
+            获取本步触发捕获条件的Hunter索引集合（active且alive且capture_counter达阈值）。
+        输入:
+            无。
+        输出:
+            List[int]: 成功触发捕获条件的Hunter索引列表。
+        """
+        captor_ids = []
+        for hid in range(self.num_hunters):
+            if not bool(self.active_hunter_mask[hid]):
+                continue
+            if not bool(self.hunters[hid].alive):
+                continue
+            if int(self.capture_counter[hid]) >= int(self.capture_step):
+                captor_ids.append(int(hid))
+        return captor_ids
+
+    def _get_encircle_hunter_ids_for_capture(self):
+        """
+        功能:
+            获取捕获时参与围捕几何的Hunter索引（active且alive，优先使用escape_radius筛选）。
+        输入:
+            无。
+        输出:
+            List[int]: 参与围捕的Hunter索引列表。
+        """
+        encircle_ids = []
+        escape_radius = float(getattr(self.target, "escape_dis", 0.0))
+        for hid in range(self.num_hunters):
+            if not bool(self.active_hunter_mask[hid]):
+                continue
+            hunter = self.hunters[hid]
+            if not bool(hunter.alive):
+                continue
+            dist = float(np.linalg.norm(np.asarray(hunter.position) - np.asarray(self.target.position)))
+            if escape_radius > 0.0 and dist > escape_radius:
+                continue
+            encircle_ids.append(int(hid))
+
+        if len(encircle_ids) == 0:
+            encircle_ids = self._get_capture_success_hunter_ids()
+        return encircle_ids
+
+    def _compute_capture_encircle_quality(self, encircle_hunter_ids):
+        """
+        功能:
+            基于围捕Hunter在Target周围的角分布，计算包围质量分数（0~1）。
+        输入:
+            encircle_hunter_ids (List[int]): 参与围捕的Hunter索引列表。
+        输出:
+            float: 包围质量分数，1表示角覆盖更均匀、最大缺口更小。
+        """
+        if encircle_hunter_ids is None or len(encircle_hunter_ids) <= 1:
+            return 0.0
+
+        target_pos = np.asarray(self.target.position, dtype=np.float32)
+        angles = []
+        for hid in encircle_hunter_ids:
+            if hid < 0 or hid >= self.num_hunters:
+                continue
+            rel = np.asarray(self.hunters[int(hid)].position, dtype=np.float32) - target_pos
+            if float(np.linalg.norm(rel)) <= 1e-8:
+                continue
+            angles.append(float(np.arctan2(rel[1], rel[0])))
+        if len(angles) <= 1:
+            return 0.0
+
+        angles = np.sort(np.asarray(angles, dtype=np.float32))
+        wrapped = np.concatenate([angles, angles[:1] + 2.0 * np.pi], axis=0)
+        gaps = np.diff(wrapped)
+        max_gap = float(np.max(gaps)) if gaps.size > 0 else float(2.0 * np.pi)
+        quality = 1.0 - float(np.clip(max_gap / (2.0 * np.pi), 0.0, 1.0))
+        return float(np.clip(quality, 0.0, 1.0))
+
+    def _assign_capture_reward(self, capture_reward):
+        """
+        功能:
+            按配置策略将捕获奖励分配给Hunter，并对Target施加捕获惩罚。
+        输入:
+            capture_reward (np.ndarray): 捕获奖励分量，shape=(agent_num,)。
+        输出:
+            无（原地写入capture_reward数组）。
+        """
+        captor_ids = self._get_capture_success_hunter_ids()
+        if len(captor_ids) == 0:
+            capture_reward[self.target_index] = -self.target_captured_penalty
+            return
+
+        mode = str(self.capture_reward_allocation)
+        if mode == "team":
+            for hid in range(self.num_hunters):
+                if not bool(self.active_hunter_mask[hid]):
+                    continue
+                if not bool(self.hunters[hid].alive):
+                    continue
+                capture_reward[int(hid)] = float(self.hunter_capture_reward)
+        elif mode == "alone":
+            for hid in captor_ids:
+                capture_reward[int(hid)] = float(self.hunter_capture_reward)
+        else:
+            for hid in captor_ids:
+                capture_reward[int(hid)] = float(self.hunter_capture_reward)
+
+            encircle_ids = self._get_encircle_hunter_ids_for_capture()
+            captor_set = set(int(hid) for hid in captor_ids)
+            support_ids = [int(hid) for hid in encircle_ids if int(hid) not in captor_set]
+            if len(support_ids) > 0:
+                quality = float(self._compute_capture_encircle_quality(encircle_ids))
+                if quality > 0.0:
+                    target_pos = np.asarray(self.target.position, dtype=np.float32)
+                    inv_dist = []
+                    for hid in support_ids:
+                        dist = float(
+                            np.linalg.norm(
+                                np.asarray(self.hunters[int(hid)].position, dtype=np.float32) - target_pos
+                            )
+                        )
+                        inv_dist.append(1.0 / max(dist, 1e-6))
+                    inv_dist = np.asarray(inv_dist, dtype=np.float32)
+                    weight_sum = float(np.max(inv_dist))
+                    if weight_sum > 1e-8:
+                        weights = inv_dist / weight_sum
+                        support_pool = float(self.hunter_capture_reward) * float(quality)
+                        for idx, hid in enumerate(support_ids):
+                            capture_reward[int(hid)] = float(support_pool) * float(weights[idx])
+
+        capture_reward[self.target_index] = -self.target_captured_penalty
+
     def _bounce_target_from_boundary(self):
         """
         功能:
@@ -2704,17 +2846,11 @@ class UAVPursuitEnv(object):
                 streak_used.append(streak_i)
                 hunter_streak_reward[hid] = self.base_streak_scale * float(streak_i)
 
-                if captured:
-                    capture_reward[hid] = self.hunter_capture_reward
-
             # Step 1.2: Target base reward取Hunter改变量的反向均值（归一化后）。
             mean_delta_norm = float(np.mean(delta_norm_values)) if len(delta_norm_values) > 0 else 0.0
             target_base_reward[self.target_index] = -float(self.base_delta_target_scale) * mean_delta_norm
             avg_streak = float(np.mean(streak_used)) if streak_used else 0.0
             target_streak_reward[self.target_index] = -self.base_streak_scale * avg_streak
-
-            if captured:
-                capture_reward[self.target_index] = -self.target_captured_penalty
         else:
             # Step 1.1: 旧版base reward（距离分段 + streak）
             active_dist_pairs = []
@@ -2749,9 +2885,6 @@ class UAVPursuitEnv(object):
                 streak_used.append(streak_i)
                 hunter_streak_reward[i] = self.base_streak_scale * float(streak_i)
 
-                if captured:
-                    capture_reward[i] = self.hunter_capture_reward
-
             min_d = min(hunter_d) if hunter_d else (2.0 * self.world_size)
             if min_d <= capture_dis_safe:
                 near_ratio_t = 1.0 - min_d / capture_dis_safe
@@ -2763,8 +2896,8 @@ class UAVPursuitEnv(object):
             avg_streak = float(np.mean(streak_used)) if streak_used else 0.0
             target_streak_reward[self.target_index] = -self.base_streak_scale * avg_streak
 
-            if captured:
-                capture_reward[self.target_index] = -self.target_captured_penalty
+        if captured:
+            self._assign_capture_reward(capture_reward)
 
         # Step 2: escape_gap拆分奖励（包围质量reward + 拦截reward）
         (

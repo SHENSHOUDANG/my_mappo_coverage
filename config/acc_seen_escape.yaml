@@ -1,6 +1,6 @@
 exp:
   algorithm_name: rmappo
-  experiment_name: Evaln320_sBuf_rndPolicy_v3v1_esc20_blk3_deltaBase5
+  experiment_name: Evaln320_sBuf_rndPolicy_v3v1_capE_esc20_blk5_deltaBase5_Zone
   seed: 1
   num_env_steps: 2000000 # total environment steps to train
   role_buffer_mode: role_shared  # Choices: ["separate", "role_shared"]
@@ -11,7 +11,7 @@ env:
   world_size: 200
   episode_length: 400 # max steps per episode
   max_hunters_num: 3
-  hunters_in_zone: false
+  hunters_in_zone: true
 
   neighbor_N: 3
   coord_summary_obs_enable: false
@@ -67,6 +67,7 @@ reward:
   # Capture reward
   hunter_capture_reward: 15.0
   target_captured_penalty: 12.0
+  capture_reward_allocation: encircle  # Choices: ["team", "alone", "encircle"]
 
   # Speed Penalty
   speed_penalty: 0.02

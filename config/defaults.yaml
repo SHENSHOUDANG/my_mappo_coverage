@@ -96,6 +96,7 @@ reward:
   # Capture reward
   hunter_capture_reward: 15.0
   target_captured_penalty: 12.0
+  capture_reward_allocation: team  # Choices: ["team", "alone", "encircle"]
   target_collision_penalty: 30.0
 
   # Speed Penalty
