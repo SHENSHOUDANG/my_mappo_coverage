@@ -23,6 +23,7 @@ import torch
 import yaml
 
 from utils.util import load_config
+from utils.network_diagram import export_network_diagram
 from envs.env_wrappers import DummyVecEnv
 
 
@@ -504,6 +505,30 @@ def main(args):
         from runner.uav.role_runner import RoleBasedRunner as Runner
 
         runner = Runner(runner_cfg, merged_cfg)
+
+        # Step 10.1: 训练开始前导出各角色Actor/Critic网络结构图
+        netviz_dir = Path(run_dir) / "network_viz"
+        for role_name, policy in runner.role_policies.items():
+            actor_stem = netviz_dir / f"actor_{role_name}"
+            critic_stem = netviz_dir / f"critic_{role_name}"
+            actor_dot = export_network_diagram(
+                policy.actor,
+                output_stem=actor_stem,
+                graph_name=f"actor_{role_name}",
+            )
+            critic_dot = export_network_diagram(
+                policy.critic,
+                output_stem=critic_stem,
+                graph_name=f"critic_{role_name}",
+            )
+            print(
+                "[NetViz] role={} actor={} critic={}".format(
+                    role_name,
+                    str(actor_dot),
+                    str(critic_dot),
+                )
+            )
+
         if bool(args.time_stat):
             runner.run_time_stat()
         else:
