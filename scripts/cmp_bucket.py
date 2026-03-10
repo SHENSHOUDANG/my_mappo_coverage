@@ -192,14 +192,13 @@ def _plot_one_metric(
     ax.set_xlabel("Num Hunters")
     ax.set_ylabel(y_label)
     ax.grid(True, linestyle="--", alpha=0.3)
-    ax.legend(loc="best")
     return used_bucket_final
 
 
 def main() -> None:
     """
     功能:
-        程序入口：读取多组bucket指标JSON并绘制reward/capture_rate/capture_steps对比图。
+        程序入口：读取多组bucket指标JSON并绘制4个核心指标对比图。
     输入:
         无（从CLI读取）。
     输出:
@@ -216,34 +215,26 @@ def main() -> None:
         if not path.exists():
             raise FileNotFoundError(f"JSON file not found: {path}")
 
-    # Step 2: 创建画布并绘制3个核心指标
+    # Step 2: 创建画布并绘制4个核心指标（2x2）
     styles = _build_styles(num_curves=len(json_paths), use_line_style=bool(args.ls))
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5), constrained_layout=True)
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9), constrained_layout=False)
+    axes = np.asarray(axes).reshape(-1)
     used_bucket = _plot_one_metric(
         ax=axes[0],
         json_paths=json_paths,
         names=list(args.names),
         styles=styles,
         bucket_name=args.bucket,
-        metric_name="eval_reward",
-        title="Eval Reward",
-        y_label="Reward",
-    )
-    _plot_one_metric(
-        ax=axes[1],
-        json_paths=json_paths,
-        names=list(args.names),
-        styles=styles,
-        bucket_name=used_bucket,
         metric_name="capture_rate",
         title="Capture Rate",
         y_label="Rate",
     )
-    axes[1].set_ylim(0.0, 1.0)
-    axes[1].set_yticks(np.linspace(0.0, 1.0, 6))
-    axes[1].set_yticklabels([f"{int(v * 100)}%" for v in np.linspace(0.0, 1.0, 6)])
+    axes[0].set_ylim(0.4, 1.0)
+    axes[0].set_yticks(np.linspace(0.4, 1.0, 7))
+    axes[0].set_yticklabels([f"{int(v * 100)}%" for v in np.linspace(0.4, 1.0, 7)])
+
     _plot_one_metric(
-        ax=axes[2],
+        ax=axes[1],
         json_paths=json_paths,
         names=list(args.names),
         styles=styles,
@@ -252,11 +243,48 @@ def main() -> None:
         title="Capture Steps",
         y_label="Steps",
     )
-    axes[2].set_ylim(0.0, 300.0)
+    axes[1].set_ylim(100.0, 300.0)
+
+    _plot_one_metric(
+        ax=axes[2],
+        json_paths=json_paths,
+        names=list(args.names),
+        styles=styles,
+        bucket_name=used_bucket,
+        metric_name="alive_rate",
+        title="Alive Rate",
+        y_label="Rate",
+    )
+    axes[2].set_ylim(0.4, 1.0)
+    axes[2].set_yticks(np.linspace(0.4, 1.0, 7))
+    axes[2].set_yticklabels([f"{int(v * 100)}%" for v in np.linspace(0.4, 1.0, 7)])
+
+    _plot_one_metric(
+        ax=axes[3],
+        json_paths=json_paths,
+        names=list(args.names),
+        styles=styles,
+        bucket_name=used_bucket,
+        metric_name="max_escape_gap_angle",
+        title="Max Escape Gap",
+        y_label="Angle (deg)",
+    )
+
+    # Step 3: 设置统一标题与图外底部图例，避免遮挡曲线
     mode_desc = "LineStyle" if bool(args.ls) else "Color"
     fig.suptitle(f"Bucket Compare ({used_bucket}) | Style={mode_desc}")
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="lower center",
+        ncol=max(1, min(len(labels), 6)),
+        bbox_to_anchor=(0.5, 0.01),
+        frameon=False,
+    )
+    fig.tight_layout(rect=[0.0, 0.08, 1.0, 0.95])
 
-    # Step 3: 输出图片或直接展示
+    # Step 4: 输出图片或直接展示
     if args.out is not None and len(str(args.out).strip()) > 0:
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
