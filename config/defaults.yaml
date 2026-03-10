@@ -20,7 +20,7 @@ env:
   num_explorers: 0
   neighbor_N: 2
   hunters_in_zone: false
-  target_avoid_hunter_zone: false
+  target_avoid_hunter_zone: true
   target_hunter_zone_min_dis: 30.0
   coord_summary_obs_enable: true
   coord_topk_hunters: 3
