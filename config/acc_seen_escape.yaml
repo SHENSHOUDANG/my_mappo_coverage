@@ -1,6 +1,6 @@
 exp:
   algorithm_name: rmappo
-  experiment_name: Evaln320_sBuf_rndPolicy_v3v1_deltaBase5_Zone
+  experiment_name: Evalb50_sBuf_patrolPolicy_v3v1_esc20_deltaBase5_Zone
   seed: 1
   num_env_steps: 2000000 # total environment steps to train
   role_buffer_mode: role_shared  # Choices: ["separate", "role_shared"]
@@ -32,9 +32,9 @@ Target:
 reward:
   # Collision Penalty
   target_collision_penalty: 30.0
-  collision_penalty_k: 5.0
-  collision_penalty_cap: 20.0
-  safe_zone_penalty_scale: 0.1
+  collision_penalty_k: 10.0
+  collision_penalty_cap: 50.0
+  safe_zone_penalty_scale: 1.0
   
   # Base chase reward
   base_reward_mode: delta_window  # Choices: ["legacy", "delta_window"]
@@ -53,7 +53,7 @@ reward:
   base_delta_norm_scale: 20.0
 
   # Escape Gap
-  escape_gap_enable: false
+  escape_gap_enable: true
   escape_gap_hunter_reward_scale: 20.0
   escape_gap_target_reward_scale: 5.0
   # 新版拆分项：包围质量reward（基于encircle_score / gap_open_score）
@@ -96,15 +96,16 @@ logging:
 
 eval:
   eval_episode_length: 600
-  fixed_tasks_file: config/eval_tasks/patrol_tasks_h8_p3_n320.yaml
+  fixed_tasks_file: config/eval_tasks/patrol_tasks_h10_p3_base50.yaml
 
 domain_randomization:
   train_split:
-    enable: true
+    enable: false
     regen_interval_episode: 20
     regen_prob: 1.0
     hunter_count_choices: [1, 2, 3]
     seed_range: [1, 99999]
+    hunters_in_zone_choices: [false,true]
     target_policy_choices: ["patrol", "random", "escape"]
     patrol_name_choices: ["all"]
 

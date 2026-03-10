@@ -1458,6 +1458,7 @@ class UAVPursuitEnv(object):
         self.default_target_policy_source = str(self.target_policy_source)
         self.default_target_patrol_names = list(env_cfg.target_patrol_names)
         self.default_target_patrol_path = str(env_cfg.target_patrol_path)
+        self.default_hunters_in_zone = bool(self.hunters_in_zone)
 
         self.train_split_cfg = config.domain_randomization.train_split
 
@@ -1620,7 +1621,7 @@ class UAVPursuitEnv(object):
     def _apply_task_spec(self, task_spec: dict, reset_position_rng: bool = True):
         """
         功能:
-            应用任务规格（激活Hunter数量、地图尺寸、Target策略与巡逻路线、初始化seed）。
+            应用任务规格（激活Hunter数量、地图尺寸、Target策略与巡逻路线、初始化seed、Hunter初始化方式）。
         输入:
             task_spec (dict): 任务规格字典。
             reset_position_rng (bool): 是否重置初始位置采样随机流。
@@ -1639,6 +1640,10 @@ class UAVPursuitEnv(object):
         self.active_num_hunters = active_num_hunters
         self.active_hunter_mask[:] = False
         self.active_hunter_mask[: self.active_num_hunters] = True
+
+        # 兼容hunters_in_zone与hunter_in_zone两种键名。
+        hunters_in_zone = spec.get("hunters_in_zone", spec.get("hunter_in_zone", self.default_hunters_in_zone))
+        self.hunters_in_zone = bool(hunters_in_zone)
 
         target_policy_source = str(spec.get("target_policy_source", self.default_target_policy_source)).lower()
         target_patrol_path = str(spec.get("target_patrol_path", self.default_target_patrol_path))
@@ -1864,6 +1869,7 @@ class UAVPursuitEnv(object):
         if not bool(split_cfg.enable):
             return {
                 "num_hunters": int(self.active_num_hunters),
+                "hunters_in_zone": bool(self.hunters_in_zone),
                 "world_size": float(self.world_size),
                 "target_policy_source": str(self.target.policy_type),
                 "target_patrol_path": str(self.default_target_patrol_path),
@@ -1873,11 +1879,32 @@ class UAVPursuitEnv(object):
             }
 
         hunter_choices = list(split_cfg.hunter_count_choices)
+        raw_zone_choices = list(getattr(split_cfg, "hunters_in_zone_choices", [self.default_hunters_in_zone]))
+        hunters_in_zone_choices = []
+        for raw in raw_zone_choices:
+            if isinstance(raw, bool):
+                hunters_in_zone_choices.append(bool(raw))
+                continue
+            if isinstance(raw, (int, np.integer)):
+                hunters_in_zone_choices.append(bool(int(raw) != 0))
+                continue
+            if isinstance(raw, str):
+                s = raw.strip().lower()
+                if s in {"1", "true", "t", "yes", "y", "on"}:
+                    hunters_in_zone_choices.append(True)
+                    continue
+                if s in {"0", "false", "f", "no", "n", "off"}:
+                    hunters_in_zone_choices.append(False)
+                    continue
+            hunters_in_zone_choices.append(bool(raw))
+        if len(hunters_in_zone_choices) == 0:
+            hunters_in_zone_choices = [bool(self.default_hunters_in_zone)]
         policy_choices = [str(x).lower() for x in list(split_cfg.target_policy_choices)]
         patrol_choices = list(split_cfg.patrol_name_choices)
         seed_range = list(split_cfg.seed_range)
 
         num_hunters = int(self.rng.choice(hunter_choices))
+        hunters_in_zone = bool(self.rng.choice(hunters_in_zone_choices))
         target_policy_source = str(self.rng.choice(policy_choices))
 
         target_patrol_names = list(self.default_target_patrol_names)
@@ -1894,6 +1921,7 @@ class UAVPursuitEnv(object):
 
         return {
             "num_hunters": int(np.clip(num_hunters, 1, self.num_hunters)),
+            "hunters_in_zone": bool(hunters_in_zone),
             "world_size": float(self.world_size),
             "target_policy_source": str(target_policy_source),
             "target_patrol_path": str(self.default_target_patrol_path),

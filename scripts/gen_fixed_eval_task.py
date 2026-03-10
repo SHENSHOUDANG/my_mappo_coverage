@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-生成固定评估任务JSON文件（支持world_size区间与最大hunter数量约束）。
+生成固定评估任务文件（支持“基础环境 x hunter数量”组合生成）。
 """
 
 from __future__ import annotations
@@ -32,16 +32,36 @@ def parse_args() -> argparse.Namespace:
         help="输出任务JSON路径，例如 config/eval_tasks/fixed_eval_generated.json",
     )
     parser.add_argument(
+        "--num_base_envs",
+        type=int,
+        default=None,
+        help="基础环境数量N。最终任务数为 N * len(hunter_count_choices)。",
+    )
+    parser.add_argument(
+        "--hunter_count_choices",
+        type=str,
+        default=None,
+        help="参与横向对比的hunter数量集合，逗号分隔，例如 1,2,4,8。",
+    )
+    parser.add_argument(
+        "--hunter_count_range",
+        type=int,
+        nargs=2,
+        default=None,
+        metavar=("MIN", "MAX"),
+        help="可选hunter数量闭区间[min,max]；与--hunter_count_choices二选一。",
+    )
+    parser.add_argument(
         "--num_tasks",
         type=int,
-        required=True,
-        help="生成任务总数。",
+        default=None,
+        help="兼容旧参数：等价于--num_base_envs。",
     )
     parser.add_argument(
         "--max_hunters",
         type=int,
-        required=True,
-        help="任务中允许的最大hunter数量（最小固定为1）。",
+        default=None,
+        help="兼容旧参数：若未提供hunter choices/range，则使用[1,max_hunters]。",
     )
     parser.add_argument(
         "--world_size",
@@ -72,6 +92,12 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="写入任务的target_route_id（通常保持0）。",
     )
+    parser.add_argument(
+        "--hunters_in_zone_choices",
+        type=str,
+        default="false,true",
+        help="基础环境中hunters_in_zone采样集合，逗号分隔，例如 false,true。",
+    )
 
     # Step 3: 注册随机种子控制参数
     parser.add_argument(
@@ -93,6 +119,126 @@ def parse_args() -> argparse.Namespace:
         help="生成器随机种子（用于hunter/world_size/策略采样）。",
     )
     return parser.parse_args()
+
+
+def _parse_int_choices(raw_text: str, arg_name: str) -> list[int]:
+    """
+    功能:
+        解析逗号分隔整数列表并去重排序。
+    输入:
+        raw_text (str): 逗号分隔字符串。
+        arg_name (str): 参数名（用于报错信息）。
+    输出:
+        list[int]: 去重排序后的整数列表。
+    """
+    values: list[int] = []
+    for token in str(raw_text).split(","):
+        s = token.strip()
+        if not s:
+            continue
+        values.append(int(s))
+    uniq = sorted(set(values))
+    if len(uniq) == 0:
+        raise ValueError(f"No valid integer choices in {arg_name}")
+    return uniq
+
+
+def _parse_bool_choices(raw_text: str, arg_name: str) -> list[bool]:
+    """
+    功能:
+        解析逗号分隔布尔列表（true/false/1/0/yes/no）并去重。
+    输入:
+        raw_text (str): 逗号分隔字符串。
+        arg_name (str): 参数名（用于报错信息）。
+    输出:
+        list[bool]: 去重后的布尔列表。
+    """
+    mapper = {
+        "1": True,
+        "true": True,
+        "t": True,
+        "yes": True,
+        "y": True,
+        "on": True,
+        "0": False,
+        "false": False,
+        "f": False,
+        "no": False,
+        "n": False,
+        "off": False,
+    }
+    values: list[bool] = []
+    for token in str(raw_text).split(","):
+        s = token.strip().lower()
+        if not s:
+            continue
+        if s not in mapper:
+            raise ValueError(f"Invalid bool choice '{token}' in {arg_name}")
+        values.append(bool(mapper[s]))
+    uniq: list[bool] = []
+    for val in values:
+        if val not in uniq:
+            uniq.append(val)
+    if len(uniq) == 0:
+        raise ValueError(f"No valid bool choices in {arg_name}")
+    return uniq
+
+
+def _resolve_hunter_count_choices(args: argparse.Namespace) -> list[int]:
+    """
+    功能:
+        解析最终hunter数量候选集合（新参数优先，兼容旧参数）。
+    输入:
+        args (argparse.Namespace): 命令行参数对象。
+    输出:
+        list[int]: 去重排序后的hunter数量列表。
+    """
+    if args.hunter_count_choices is not None and args.hunter_count_range is not None:
+        raise ValueError("Use only one of --hunter_count_choices and --hunter_count_range")
+
+    if args.hunter_count_choices is not None:
+        choices = _parse_int_choices(str(args.hunter_count_choices), "--hunter_count_choices")
+    elif args.hunter_count_range is not None:
+        h_min = int(args.hunter_count_range[0])
+        h_max = int(args.hunter_count_range[1])
+        if h_max < h_min:
+            raise ValueError("--hunter_count_range MAX must be >= MIN")
+        choices = list(range(int(h_min), int(h_max) + 1))
+    else:
+        if args.max_hunters is None:
+            raise ValueError(
+                "Please provide hunter counts via --hunter_count_choices/--hunter_count_range "
+                "or legacy --max_hunters"
+            )
+        max_hunters = int(args.max_hunters)
+        if max_hunters < 1:
+            raise ValueError("--max_hunters must be >= 1")
+        choices = list(range(1, max_hunters + 1))
+
+    cleaned = sorted({int(x) for x in choices if int(x) >= 1})
+    if len(cleaned) == 0:
+        raise ValueError("No valid hunter count after filtering (must be >= 1)")
+    return cleaned
+
+
+def _resolve_num_base_envs(args: argparse.Namespace) -> int:
+    """
+    功能:
+        解析基础环境数量（优先新参数，兼容旧参数）。
+    输入:
+        args (argparse.Namespace): 命令行参数对象。
+    输出:
+        int: 基础环境数量。
+    """
+    if args.num_base_envs is not None and args.num_tasks is not None:
+        raise ValueError("Use only one of --num_base_envs and legacy --num_tasks")
+    val = args.num_base_envs if args.num_base_envs is not None else args.num_tasks
+    if val is None:
+        raise ValueError("Please provide --num_base_envs (or legacy --num_tasks)")
+    out = int(val)
+    if out <= 0:
+        raise ValueError("--num_base_envs/--num_tasks must be > 0")
+    return out
 
 
 def _load_route_names_from_json(route_path: Path) -> list[str]:
@@ -157,10 +303,8 @@ def build_tasks(args: argparse.Namespace) -> list[dict]:
         list[dict]: 任务规格字典列表。
     """
     # Step 1: 参数有效性校验
-    if int(args.num_tasks) <= 0:
-        raise ValueError("--num_tasks must be > 0")
-    if int(args.max_hunters) < 1:
-        raise ValueError("--max_hunters must be >= 1")
+    num_base_envs = _resolve_num_base_envs(args)
+    hunter_count_choices = _resolve_hunter_count_choices(args)
     world_size_range = None
     if args.world_size is not None:
         world_min = float(args.world_size[0])
@@ -176,28 +320,32 @@ def build_tasks(args: argparse.Namespace) -> list[dict]:
     patrol_route_pool = _resolve_patrol_route_pool(list(args.target_patrol_paths))
     if "patrol" in policy_choices and len(patrol_route_pool) == 0:
         raise ValueError("Patrol policy requested but no valid patrol route names found")
+    hunters_in_zone_choices = _parse_bool_choices(str(args.hunters_in_zone_choices), "--hunters_in_zone_choices")
 
-    # Step 3: 采样生成任务列表
+    # Step 3: 先采样基础环境，再与hunter数量集合做笛卡尔组合
     rng = random.Random(int(args.rand_seed))
-    tasks: list[dict] = []
-    for idx in range(int(args.num_tasks)):
+    base_specs: list[dict] = []
+    for idx in range(int(num_base_envs)):
         policy = rng.choice(policy_choices)
-        num_hunters = int(rng.randint(1, int(args.max_hunters)))
         route_path, route_name = rng.choice(patrol_route_pool)
-        task = {
-            "num_hunters": int(num_hunters),
+        base_spec = {
             "seed": int(int(args.seed_start) + idx * int(args.seed_step)),
             "target_policy_source": str(policy),
             "target_patrol_path": str(route_path),
             "target_route_id": int(args.target_route_id),
+            "target_patrol_names": [str(route_name)],
+            "hunters_in_zone": bool(rng.choice(hunters_in_zone_choices)),
         }
         if world_size_range is not None:
-            task["world_size"] = float(rng.uniform(float(world_size_range[0]), float(world_size_range[1])))
-        if policy == "patrol":
-            task["target_patrol_names"] = [str(route_name)]
-        else:
-            task["target_patrol_names"] = [str(route_name)]
-        tasks.append(task)
+            base_spec["world_size"] = float(rng.uniform(float(world_size_range[0]), float(world_size_range[1])))
+        base_specs.append(base_spec)
+
+    tasks: list[dict] = []
+    for base_spec in base_specs:
+        for num_hunters in hunter_count_choices:
+            task = dict(base_spec)
+            task["num_hunters"] = int(num_hunters)
+            tasks.append(task)
     return tasks
 
 
@@ -225,10 +373,11 @@ def main() -> None:
 
     # Step 3: 打印生成摘要
     print(
-        "Generated {} fixed eval tasks to {} (max_hunters={}, world_size={}).".format(
+        "Generated {} fixed eval tasks to {} (num_base_envs={}, hunter_count_choices={}, world_size={}).".format(
             int(len(tasks)),
             str(args.output),
-            int(args.max_hunters),
+            int(_resolve_num_base_envs(args)),
+            _resolve_hunter_count_choices(args),
             "disabled" if args.world_size is None else f"[{float(args.world_size[0])}, {float(args.world_size[1])}]",
         )
     )
@@ -254,6 +403,7 @@ def _dump_grouped_yaml(output_path: Path, tasks: list[dict]) -> None:
     # Step 2: 统一字段顺序，构建可读性更强的inline映射行
     preferred_order = [
         "num_hunters",
+        "hunters_in_zone",
         "world_size",
         "seed",
         "target_policy_source",

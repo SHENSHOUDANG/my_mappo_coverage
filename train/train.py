@@ -208,12 +208,14 @@ def _print_domain_randomization_settings(
         无。
     """
     train_split = merged_cfg.domain_randomization.train_split
+    zone_choices = list(getattr(train_split, "hunters_in_zone_choices", [merged_cfg.env.hunters_in_zone]))
     print(
-        "[DomainRandConfig] train.enable={}, interval={}, prob={}, hunter_choices={}, seed_range={}, target_policies={}, patrol_pool={}".format(
+        "[DomainRandConfig] train.enable={}, interval={}, prob={}, hunter_choices={}, hunters_in_zone_choices={}, seed_range={}, target_policies={}, patrol_pool={}".format(
             bool(train_split.enable),
             int(train_split.regen_interval_episode),
             float(train_split.regen_prob),
             list(train_split.hunter_count_choices),
+            zone_choices,
             list(train_split.seed_range),
             list(train_split.target_policy_choices),
             list(train_split.patrol_name_choices),

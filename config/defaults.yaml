@@ -203,6 +203,7 @@ domain_randomization:
     regen_interval_episode: 1
     regen_prob: 1.0
     hunter_count_choices: [3]
+    hunters_in_zone_choices: [false]
     seed_range: [1, 100000]
     target_policy_choices: ["learn"]
     patrol_name_choices: ["square", "ring"]

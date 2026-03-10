@@ -36,11 +36,15 @@ CUDA 训练前（按需）：
 离线评估：
 `python train/eval.py --config_file <config_file_path>`
 
+生成固定评估任务（基础环境 × hunter数量，用于横向对比）：
+`python scripts/gen_fixed_eval_task.py --output <eval_tasks_yaml_or_json> --num_base_envs <N> --hunter_count_choices <h1,h2,...> --world_size <min_ws> <max_ws> --target_policy_choices <random,patrol> --target_patrol_paths <path1,path2,...> --hunters_in_zone_choices <false,true> --seed_start <seed0> --seed_step <step> --rand_seed <rand_seed>`
+
 ## Implementation Notes (train/env)
 - `train/train.py` 会先加载并深度合并 `config/defaults.yaml` 与用户 YAML。
 - 训练环境使用 `mode=initial` 自动 reset；评估环境使用固定任务并 `mode=recover` 自动 reset，保证同任务可重复比较。
 - 若 `eval.fixed_tasks_file` 存在，评估线程数会自动对齐任务数。
 - `RoleBasedRunner` 使用角色共享策略：hunter 共享一个 policy；当 `target_policy_source=learn` 时 target 也参与训练。
+- `domain_randomization.train_split.hunters_in_zone_choices` 可配置训练阶段初始化模式采样（zone / 非zone）。
 
 ## Coding Style & Naming Conventions
 - 遵循 PEP 8，4 空格缩进。
