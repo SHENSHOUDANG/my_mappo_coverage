@@ -9,12 +9,16 @@ Standalone evaluation entry for saved models under one run_dir.
 
 import os
 import sys
-parent_dir = os.path.abspath(os.path.join(os.getcwd(), "."))
-sys.path.append(parent_dir)
+from pathlib import Path
+
+# 将项目根目录插入sys.path首位，避免train/train.py遮蔽train包。
+project_root = Path(__file__).resolve().parents[1]
+project_root_str = str(project_root)
+if project_root_str not in sys.path:
+    sys.path.insert(0, project_root_str)
 
 import argparse
 import csv
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -94,6 +98,8 @@ def main(args):
         merged_cfg = load_config(Path(args.run_dir) / "train_cfg.yaml")
 
     use_cuda = (bool(args.cuda) or bool(merged_cfg.exp.cuda)) and torch.cuda.is_available()
+    merged_cfg.logging.log_gif = True
+
     if use_cuda:
         print("choose to use gpu...")
         device = torch.device("cuda:0")
